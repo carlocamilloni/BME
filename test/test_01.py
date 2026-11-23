@@ -5,7 +5,6 @@ reproduced by the current version with both numpy 1.x and 2.x.
 """
 import os
 import numpy as np
-import filecmp
 
 from conftest import BME_DIR, REFERENCE_DIR
 
@@ -55,6 +54,30 @@ def calc_diff(vref,v):
     v = np.asarray(v,dtype=float)
     assert vref.shape == v.shape
     return np.max(np.abs(vref-v))
+
+def compare_predict_files(ref,new,rtol=2e-3):
+    # same labels, columns and violation flags; numbers equal within rtol
+    # (the last printed digit can change with the optimizer convergence)
+    def read(fname):
+        rows,footer = [],[]
+        with open(fname) as fh:
+            for line in fh:
+                if line.startswith("#"):
+                    footer.append(line.split())
+                else:
+                    rows.append(line.split())
+        return rows,footer
+    rows_ref,foot_ref = read(ref)
+    rows_new,foot_new = read(new)
+    assert len(rows_ref)==len(rows_new) and len(foot_ref)==len(foot_new)
+    for a,b in zip(rows_ref,rows_new):
+        assert a[0]==b[0] and a[-1]==b[-1]
+        np.testing.assert_allclose(np.array(a[1:-1],float),np.array(b[1:-1],float),rtol=rtol)
+    assert foot_ref[0]==foot_new[0]
+    for a,b in zip(foot_ref[1:],foot_new[1:]):
+        assert a[:2]==b[:2]
+        np.testing.assert_allclose(np.array(a[2:],float),np.array(b[2:],float),rtol=rtol)
+
 
 class TestClass:
     
@@ -167,8 +190,8 @@ class TestClass:
         out_noe = str(tmp_path / "example_01_noe")
         stats = rew.predict(exp_file_3j,calc_file_3j,out_3j)
         stats_noe = rew.predict(exp_file_noe,calc_file_noe,out_noe)
-        assert filecmp.cmp(os.path.join(REFERENCE_DIR,"example_01_couplings"),out_3j,shallow=False)
-        assert filecmp.cmp(os.path.join(REFERENCE_DIR,"example_01_noe"),out_noe,shallow=False)
+        compare_predict_files(os.path.join(REFERENCE_DIR,"example_01_couplings"),out_3j)
+        compare_predict_files(os.path.join(REFERENCE_DIR,"example_01_noe"),out_noe)
         print("...OK")
         
     # test RDC

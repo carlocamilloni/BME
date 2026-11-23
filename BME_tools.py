@@ -52,10 +52,58 @@ def read_xvg(xvg_file,column=1):
     data = np.array(rows)
     return data[:,0],data[:,1],legends.get(column)
 
+# weighted average over samples: sum_k w_k calc_kj.
+# A matrix-vector product, so that no temporary array of the size of calc is
+# created (calc can be (1e6 frames x 1e2 data) for long trajectories)
+def wavg(calc,sample_weights):
+    return np.dot(np.asarray(sample_weights,dtype=float),calc)
+
+# weighted variance of each column, computed in blocks of rows to limit memory
+def _weighted_var(calc,sample_weights,mean,chunk=50000):
+    var = np.zeros(calc.shape[1])
+    for start in range(0,calc.shape[0],chunk):
+        d = calc[start:start+chunk]-mean
+        var += np.dot(sample_weights[start:start+chunk],d*d)
+    return var/np.sum(sample_weights)
+
 # calculate relative entropy
 def srel(w0,w1):
     idxs = np.where(w1>1.0E-50)
     return np.sum(w1[idxs]*np.log(w1[idxs]/w0[idxs]))
+
+# upper bound of the number of rows of a (possibly compressed) text file
+def _count_lines(fname):
+    from pandas.io.common import get_handle
+    n = 0
+    with get_handle(fname,"rb",compression="infer",is_text=False) as handles:
+        fh = handles.handle
+        last = b""
+        while True:
+            buf = fh.read(1<<24)
+            if not buf:
+                break
+            n += buf.count(b"\n")
+            last = buf[-1:]
+    return n + (1 if last not in (b"",b"\n") else 0)
+
+# read a calculated-data file (first column: frame number, not used) into a
+# C-ordered float64 array (nsamples x ndata). Rows are counted first and the
+# file is then read in blocks into a preallocated array, so that memory use
+# stays close to the size of the data (files can be > 1 GB)
+def read_calc(calc_file,chunksize=20000):
+    kw = dict(sep=r"\s+",header=None,comment="#")
+    ncols = pd.read_csv(calc_file,nrows=1,**kw).shape[1]
+    if ncols<2:
+        raise ValueError("Calculated data file %s must have at least two columns (frame, data...)" % calc_file)
+    calc = np.empty((_count_lines(calc_file),ncols-1),dtype=np.float64)
+    nrows = 0
+    for chunk in pd.read_csv(calc_file,usecols=list(range(1,ncols)),dtype=np.float64,chunksize=chunksize,**kw):
+        calc[nrows:nrows+chunk.shape[0]] = chunk.to_numpy(dtype=np.float64)
+        nrows += chunk.shape[0]
+    if nrows<calc.shape[0]:
+        # comment or empty lines: keep only the rows that were read
+        calc = calc[:nrows].copy() if nrows<0.99*calc.shape[0] else calc[:nrows]
+    return calc
 
 # parse files
 def parse(exp_file,calc_file,averaging="auto"):
@@ -89,16 +137,14 @@ def parse(exp_file,calc_file,averaging="auto"):
     df_exp = df_exp.rename(columns={0: "label", 1: "val",2:"sigma"})
         
     # read calculated datafile
-    df_calc = pd.read_csv(calc_file,sep=r"\s+",header=None,comment="#")
-    # Drop frame
-    df_calc = df_calc.drop(columns=[0])
+    calc = read_calc(calc_file)
 
-    if (df_calc.shape[1])!=df_exp.shape[0]:
-        raise ValueError("Error: Number of experimental data in %s (%d) must match the calculated data in %s (%d)" % (exp_file,df_exp.shape[0],calc_file,df_calc.shape[1]))
+    if (calc.shape[1])!=df_exp.shape[0]:
+        raise ValueError("Error: Number of experimental data in %s (%d) must match the calculated data in %s (%d)" % (exp_file,df_exp.shape[0],calc_file,calc.shape[1]))
 
     # write to log file
     log += "# Reading %d experimental data from %s \n" % (df_exp.shape[0],exp_file)
-    log += "# Reading %d calculated samples from %s \n" % (df_calc.shape[0],calc_file)
+    log += "# Reading %d calculated samples from %s \n" % (calc.shape[0],calc_file)
         
             
     # determine averaging
@@ -116,7 +162,7 @@ def parse(exp_file,calc_file,averaging="auto"):
         noe_power = int(averaging.split("_")[-1])
         df_exp["avg"] = np.power(df_exp["val"], -noe_power)
         df_exp["sigma2"] = (noe_power*df_exp["avg"]*df_exp["sigma"]/(df_exp["val"]))
-        df_calc = np.power(df_calc, -noe_power)
+        np.power(calc, -noe_power, out=calc)
             
         # if bound constraints, swap lower and upper
         if(bound_string=="LOWER"):
@@ -135,7 +181,6 @@ def parse(exp_file,calc_file,averaging="auto"):
 
     labels = df_exp["label"].values
     exp = np.array(df_exp[["avg","sigma2","bound"]].values)
-    calc = np.array(df_calc.values)
     return labels,exp,calc,log,averaging
 
 
@@ -145,7 +190,7 @@ def fit_and_scale(exp,calc,sample_weights,fit):
     if fit not in fit_types:
         raise ValueError("fit type must be in %s " % (fit_types))
 
-    calc_avg = np.sum(calc*sample_weights[:,np.newaxis],axis=0)
+    calc_avg = wavg(calc,sample_weights)
     log = "# Using %s scaling \n" % (fit)
     if(fit=="no"):
         return calc_avg,log
@@ -170,7 +215,7 @@ def fit_and_scale(exp,calc,sample_weights,fit):
         calc *=slope
         calc +=intercept
 
-        calc_avg = np.sum(calc*sample_weights[:,np.newaxis],axis=0)
+        calc_avg = wavg(calc,sample_weights)
         log += "# Slope=%8.4f; Offset=%8.4f; r2=%8.4f \n" % (slope,intercept,r_value)
         return calc_avg,log
 
@@ -192,8 +237,11 @@ def subsample(label,exp,calc,use_samples,use_data):
 
 # calculate chi2
 def calc_chi(exp,calc,sample_weights):
-    
-    calc_avg = np.sum(calc*sample_weights[:,np.newaxis],axis=0)
+    return calc_chi_avg(exp,wavg(calc,sample_weights))
+
+# chi2 from the averages
+def calc_chi_avg(exp,calc_avg):
+    calc_avg = np.array(calc_avg,dtype=float)
 
     diff = (calc_avg-exp[:,0])    
     ii = np.where(((diff<0) & (exp[:,2]<0)) | ((diff>0) & (exp[:,2]>0)) )[0]
@@ -204,7 +252,7 @@ def calc_chi(exp,calc,sample_weights):
 # sanity check 
 def check_data(label,exp,calc,sample_weights):
 
-    calc_avg = np.sum(calc*sample_weights[:,np.newaxis],axis=0)
+    calc_avg = wavg(calc,sample_weights)
 
     log = ""
 
@@ -281,8 +329,8 @@ def calc_stats(label,exp,calc,sample_weights0,sample_weights1,averaging,fit,outf
     if len(sample_weights1)==0:
         raise ValueError("Optimized weights are not available. Call fit() (or ibme()) before predict()")
     
-    calc_avg0 = np.sum(calc*sample_weights0[:,np.newaxis],axis=0)
-    calc_avg1 = np.sum(calc*sample_weights1[:,np.newaxis],axis=0)
+    calc_avg0 = wavg(calc,sample_weights0)
+    calc_avg1 = wavg(calc,sample_weights1)
     
     exp_avg = exp[:,0]
     oversigma = (1./exp[:,1]**2)
@@ -308,14 +356,14 @@ def calc_stats(label,exp,calc,sample_weights0,sample_weights1,averaging,fit,outf
     if(averaging.split("_")[0]=="power"):
         noe_power = int(averaging.split("_")[-1])
 
-        calc_avg0 = np.power(np.sum((slope0*calc+intercept0)*sample_weights0[:,np.newaxis],axis=0),-1/noe_power)
-        calc_avg1 = np.power(np.sum((slope1*calc+intercept1)*sample_weights1[:,np.newaxis],axis=0),-1/noe_power)
+        calc_avg0 = np.power(slope0*calc_avg0+intercept0*np.sum(sample_weights0),-1/noe_power)
+        calc_avg1 = np.power(slope1*calc_avg1+intercept1*np.sum(sample_weights1),-1/noe_power)
         exp_avg = np.power(exp[:,0],-1/noe_power)
         exp_sigma = (exp_avg*exp[:,1])/(noe_power*exp[:,0])
         bounds = -exp[:,2]
     else:
-        calc_avg0 = np.sum((slope0*calc+intercept0)*sample_weights0[:,np.newaxis],axis=0)
-        calc_avg1 = np.sum((slope1*calc+intercept1)*sample_weights1[:,np.newaxis],axis=0)
+        calc_avg0 = slope0*calc_avg0+intercept0*np.sum(sample_weights0)
+        calc_avg1 = slope1*calc_avg1+intercept1*np.sum(sample_weights1)
 
         exp_avg = exp[:,0]
         exp_sigma = exp[:,1]
@@ -348,52 +396,42 @@ def calc_stats(label,exp,calc,sample_weights0,sample_weights1,averaging,fit,outf
     return stats,log
 
 
-# standardize dataset. Modify array in place
-def standardize(exp,calc,sample_weights,normalize="zscore"):
-
-    log = ""
+# parameters of the standardization x -> (x-v1)/v2, without modifying the data
+def standardization(exp,calc,sample_weights,normalize="zscore"):
+    ndata = exp.shape[0]
     if(normalize=="zscore"):
-        v1 = np.sum(calc*sample_weights[:,np.newaxis],axis=0)
-        calc_var = np.average((v1-calc)**2, weights=sample_weights,axis=0)
-        #v2 = np.sqrt(np.average(np.array([calc_var,exp[:,1]]),axis=0)) # std
+        v1 = wavg(calc,sample_weights)
+        calc_var = _weighted_var(calc,sample_weights,v1)
         v2 = np.average(np.array([np.sqrt(calc_var),exp[:,1]]),axis=0)
-        exp[:,0] -= v1
-        exp[:,0] /= v2
-        calc -= v1
-        calc /= v2
-        exp[:,1] /= v2
-        
-        log += "# Z-score normalization \n"
-        
+        log = "# Z-score normalization \n"
     elif(normalize=="minmax"):
-        mmin = calc.min(axis=0)
-        mmax = calc.max(axis=0)
-        delta = mmax-mmin
-        #exp[:,0] = (exp[:,0]-mmin)/delta
-        #calc = (calc-mmin)/delta
-        exp[:,0] -= mmin
-        exp[:,0] /= delta
-        calc -= mmin
-        calc /= delta
-        exp[:,1] /= delta
-        v1 = mmin
-        v2 = delta
-        log += "# MinMax normalization \n"
-
+        v1 = calc.min(axis=0)
+        v2 = calc.max(axis=0)-v1
+        log = "# MinMax normalization \n"
     # do not use this one
     elif(normalize=="bme"):
-        ff = np.copy(exp[:,0])
-        exp[:,1] /= ff
-        calc /= ff
-        exp[:,0] /= ff
-        v1 = 0
-        v2 = ff
-        log += "# BME normalization \n"
+        v1 = np.zeros(ndata)
+        v2 = np.array(exp[:,0],dtype=float)
+        log = "# BME normalization \n"
     elif(normalize=="none"):
-        v1 = 0.
-        v2 = 1.
-        log += "# No normalization \n"
+        v1 = np.zeros(ndata)
+        v2 = np.ones(ndata)
+        log = "# No normalization \n"
     else:
         raise ValueError("normalize must be one of zscore, minmax, bme, none (got %s)" % normalize)
     return log,v1,v2
 
+# standardize dataset. Modify array in place
+def standardize(exp,calc,sample_weights,normalize="zscore"):
+
+    log,v1,v2 = standardization(exp,calc,sample_weights,normalize=normalize)
+    exp[:,0] -= v1
+    exp[:,0] /= v2
+    exp[:,1] /= v2
+    calc -= v1
+    calc /= v2
+    if(normalize=="none"):
+        v1,v2 = 0.,1.
+    elif(normalize=="bme"):
+        v1 = 0
+    return log,v1,v2

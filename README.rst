@@ -96,15 +96,32 @@ With ``--scan`` a table of the reweighted average, chi2 and fraction of effectiv
 (phi) for a range of theta values is printed: with a single target value cross-validation
 is not possible, so choose the largest theta whose average is close enough to the target.
 
-From Python the same is done with ``Reweight.load_xvg``, which can be combined with other data
+Rg can be combined with other data in BME format, e.g. chemical shifts. The rows of the
+calculated file must be the same frames as the ``.xvg`` frames that are used: if the chemical
+shifts were computed every 10 frames, use ``--stride 10``. With many chemical shifts and a
+single Rg, ``--rg-weight`` sets how many data points the Rg counts for
+
+::
+
+    bme-rg gyrate.xvg --target 1.85 --sigma 0.05 --stride 10 \
+           --data cs_exp.dat cs_calc.dat --rg-weight 10 --scan
+
+From Python the same is done with ``Reweight.load_xvg`` (options ``begin``, ``end``, ``stride``,
+``use_samples``, ``weight``), and ``predict_xvg`` reports the Rg statistics after the fit
 
 ::
 
     import BME
-    rew = BME.Reweight("rg")
-    rew.load_xvg("gyrate.xvg", target=1.85, sigma=0.05)
+    rew = BME.Reweight("rg_cs")
+    rew.load("cs_exp.dat", "cs_calc.dat")
+    rew.load_xvg("gyrate.xvg", target=1.85, sigma=0.05, stride=10, weight=10)
     chi2_before, chi2_after, phi = rew.fit(theta=2)
     weights = rew.get_weights()
+    rg_stats = rew.predict_xvg("gyrate.xvg", 1.85, 0.05, stride=10)
+
+The ``weight`` of a dataset (in ``load``, ``load_array`` and ``load_xvg``) is its relative
+importance: a data point with weight k counts as k data points, i.e. as if its error were
+divided by sqrt(k).
 
 
 Examples

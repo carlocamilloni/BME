@@ -296,3 +296,42 @@ def test_standardize_bme_returns_original_scale():
     log, v1, v2 = bt.standardize(exp, calc, np.ones(2) / 2, "bme")
     np.testing.assert_allclose(v2, [4.0, 5.0])
     np.testing.assert_allclose(exp[:, 0], 1.0)
+
+
+# ---------------------------------------------------------------- read_calc
+@pytest.mark.parametrize("compression", [None, "zip", "gzip"])
+def test_read_calc_matches_loadtxt(tmp_path, compression):
+    rng = np.random.default_rng(4)
+    data = rng.normal(size=(1234, 7))
+    text = "# header\n" + "".join("%d " % i + " ".join(repr(float(x)) for x in row) + "\n" for i, row in enumerate(data))
+    text = text.replace("\n500 ", "\n# a comment in the middle\n500 ")
+    if compression is None:
+        f = tmp_path / "c.dat"
+        f.write_text(text)
+    elif compression == "zip":
+        import zipfile
+        f = tmp_path / "c.dat.zip"
+        with zipfile.ZipFile(f, "w") as zf:
+            zf.writestr("c.dat", text)
+    else:
+        import gzip
+        f = tmp_path / "c.dat.gz"
+        with gzip.open(f, "wt") as fh:
+            fh.write(text)
+    calc = bt.read_calc(str(f), chunksize=100)
+    assert calc.flags["C_CONTIGUOUS"] and calc.dtype == np.float64
+    np.testing.assert_allclose(calc, data, rtol=1e-14, atol=1e-15)  # pandas parses to within 1 ulp
+
+
+def test_read_calc_without_final_newline(tmp_path):
+    f = tmp_path / "c.dat"
+    f.write_text("0 1.0 2.0\n1 3.0 4.0")
+    np.testing.assert_array_equal(bt.read_calc(str(f)), [[1.0, 2.0], [3.0, 4.0]])
+
+
+def test_wavg_and_chi_avg():
+    calc = np.arange(12.0).reshape(4, 3)
+    w = np.array([0.1, 0.2, 0.3, 0.4])
+    np.testing.assert_allclose(bt.wavg(calc, w), np.sum(calc * w[:, None], axis=0))
+    exp = np.column_stack([bt.wavg(calc, w) + 1.0, np.full(3, 2.0), np.zeros(3)])
+    assert bt.calc_chi_avg(exp, bt.wavg(calc, w)) == pytest.approx(0.25)

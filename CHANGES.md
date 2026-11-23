@@ -9,6 +9,30 @@ New features
 - `bme-rg` command: reweights towards a target radius of gyration, prints a theta scan,
   writes the weights (time, weight) and optionally a plot of the Rg distributions.
 
+Combining datasets and long trajectories
+- The `weight` argument of `load`/`load_array` acted in the opposite direction (weight=10
+  made a dataset 10x *less* important). A data point with weight k now counts as k data
+  points (sigma -> sigma/sqrt(k)); weight=1 (the default) gives the same results as before.
+  It is also used by the BER/CHI2 methods.
+- `load_xvg`: `stride` and `use_samples`, to match data computed on a subsampled
+  trajectory; `predict_xvg` gives Rg statistics after a fit. Datasets with different numbers
+  of frames give an error that says so (it wrongly mentioned the initial weights w0).
+- `bme-rg`: `--data EXP CALC` (repeatable) to reweight Rg together with chemical shifts or
+  other data, `--stride`, `--rg-weight`; chi2 is reported for each dataset; the data are
+  loaded once for the theta scan.
+- Memory and speed for large data (e.g. 1.25e6 frames x 250 chemical shifts, 2.3 GB):
+  - Lagrange multipliers were `np.longdouble`, so every product with the data matrix
+    bypassed BLAS (about 50x slower) and temporaries were 16 bytes per element.
+  - Products are computed as matrix-vector products instead of broadcast temporaries,
+    standardization does not copy the data, calculated files are read into a preallocated
+    array, and datasets are stored as separate blocks instead of being concatenated.
+  - Peak memory goes from >4x to about 1.2x the size of the data; on the example above the
+    fit takes 40 s.
+- L-BFGS-B tolerances tightened (`ftol=1e-12`, `gtol=1e-9`): with the defaults the
+  minimization could stop early on ill-conditioned problems (SAXS) and results depended on
+  round-off (numpy/scipy version). Converged results agree with the reference values in
+  `test/test_01.py`; the `predict` output test compares numbers with a tolerance.
+
 Packaging
 - `pyproject.toml`: BME can be installed with `pip install .` (modules `BME` and
   `BME_tools`, so `import BME` works unchanged). Optional extras `[test]` and `[notebooks]`.

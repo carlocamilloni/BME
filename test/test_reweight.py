@@ -300,3 +300,62 @@ def test_iterative_theta_scan_runs():
     best = rew.iterative_theta_scan(thetas=thetas, nfold=2, iterations=5)
     assert best in thetas
     assert os.path.exists("crossval_its.png")
+
+
+# ------------------------------------------------------------ data weights / blocks
+def test_weight_means_importance_and_equals_smaller_sigma():
+    # a data point with weight k is equivalent to the same point with sigma/sqrt(k)
+    labels, exp, calc = gaussian_problem(ndata=3, nsamples=3000)
+    a = BME.Reweight("wa")
+    a.load_array(labels[:2], exp[:2].copy(), calc[:, :2].copy())
+    a.load_array(labels[2:], exp[2:].copy(), calc[:, 2:].copy(), weight=9.0)
+    a.fit(1.0)
+    exp_b = exp.copy()
+    exp_b[2, 1] /= 3.0
+    b = BME.Reweight("wb")
+    b.load_array(labels, exp_b, calc.copy())
+    b.fit(1.0)
+    np.testing.assert_allclose(a.get_weights(), b.get_weights(), rtol=1e-6, atol=1e-12)
+    # and a larger weight brings that average closer to its target
+    c = BME.Reweight("wc")
+    c.load_array(labels, exp.copy(), calc.copy())
+    c.fit(1.0)
+    dev = lambda r: abs(r.get_weights() @ calc[:, 2] - exp[2, 0])
+    assert dev(a) < dev(c)
+
+
+def test_invalid_weight():
+    rew, labels, exp, calc = make()
+    with pytest.raises(ValueError, match="weight"):
+        rew.load_array(labels, exp, calc, weight=0)
+
+
+def test_blocks_give_same_result_as_single_array():
+    labels, exp, calc = gaussian_problem(ndata=5, nsamples=2000)
+    a = BME.Reweight("ba")
+    for sl in [slice(0, 2), slice(2, 3), slice(3, 5)]:
+        a.load_array(labels[sl], exp[sl].copy(), calc[:, sl].copy())
+    b = BME.Reweight("bb")
+    b.load_array(labels, exp.copy(), calc.copy())
+    np.testing.assert_allclose(a.fit(1.0), b.fit(1.0), rtol=1e-10)
+    np.testing.assert_allclose(a.get_weights(), b.get_weights(), rtol=1e-8, atol=1e-14)
+    np.testing.assert_array_equal(a.get_calculated(), calc)
+    np.testing.assert_array_equal(a.calculated, calc)
+    np.testing.assert_array_equal(a.get_calculated(columns=[4, 0]), calc[:, [4, 0]])
+    np.testing.assert_array_equal(a.get_calculated(columns=[-1])[:, 0], calc[:, 4])
+    np.testing.assert_allclose(a.calc_averages(a.get_w0()), calc.mean(0))
+
+
+def test_lambdas_are_float64():
+    # extended precision makes every product with the data matrix bypass BLAS
+    rew, *_ = make(ndata=2, nsamples=500)
+    rew.fit(1.0)
+    assert np.asarray(rew.get_lambdas()).dtype == np.float64
+
+
+def test_frame_mismatch_message():
+    labels, exp, calc = gaussian_problem(ndata=2, nsamples=100)
+    rew = BME.Reweight("fm")
+    rew.load_array(labels[:1], exp[:1], calc[:, :1])
+    with pytest.raises(ValueError, match="same frames"):
+        rew.load_array(labels[1:], exp[1:], calc[:50, 1:])

@@ -59,6 +59,40 @@ class Reweight:
         self.weights = []
         self.standardized = False
 
+    # The calculated data are stored as a list of blocks (one per loaded
+    # dataset, each nsamples x ndata_b) and never concatenated internally:
+    # adding e.g. one Rg column to 1e6 frames x 250 chemical shifts would
+    # otherwise copy the whole matrix. self.calculated returns the full
+    # (nsamples x ndata) matrix, as a new array when there are several blocks.
+    @property
+    def calculated(self):
+        blocks = self.__dict__.get("_blocks",[])
+        if len(blocks)==0:
+            return []
+        if len(blocks)==1:
+            return blocks[0]
+        return np.hstack(blocks)
+
+    @calculated.setter
+    def calculated(self,value):
+        self._blocks = [] if len(value)==0 else [np.ascontiguousarray(value,dtype=np.float64)]
+
+    def _slices(self):
+        out,n0 = [],0
+        for b in self._blocks:
+            out.append(slice(n0,n0+b.shape[1]))
+            n0 += b.shape[1]
+        return out
+
+    # weighted averages of all data, sum_k w_k calc_kj (no copy of the data)
+    def calc_averages(self,weights):
+        weights = np.asarray(weights,dtype=float)
+        return np.concatenate([np.dot(weights,b) for b in self._blocks])
+
+    # calc @ vec for a vector of length ndata (no copy of the data)
+    def _calc_dot(self,vec):
+        return sum(np.dot(b,vec[sl]) for b,sl in zip(self._blocks,self._slices()))
+
     # the log file is kept open; close it explicitly, or use
     # "with Reweight(name) as rew:" to close it automatically
     def close(self):
@@ -72,6 +106,9 @@ class Reweight:
         self.close()
 
     def _check_w0(self,nsamples,where):
+        if(len(self.experiment)!=0 and nsamples!=self.get_nsamples()):
+            raise ValueError("%s has %d samples (frames) but the data loaded before have %d: all datasets must refer to the same frames "
+                             "(use use_samples in load(), or stride/begin/end/use_samples in load_xvg())" % (where,nsamples,self.get_nsamples()))
         if(len(self.w0)!=0 and len(self.w0)!=nsamples):
             raise ValueError("Number of initial weights w0 (%d) does not match the number of samples in %s (%d)" % (len(self.w0),where,nsamples))
         
@@ -102,14 +139,20 @@ class Reweight:
 
         return label,exp,calc
 
+    # weight: relative importance of each data point of this dataset; a data
+    # point with weight k counts as k data points with the same error
+    # (equivalent to dividing its sigma by sqrt(k)). Useful to balance a single
+    # observable (e.g. Rg) against a large dataset (e.g. chemical shifts).
     def load(self,exp_file,calc_file,averaging="auto",fit='no',use_samples=[],use_data=[],weight=1):
         
         label,exp, calc = self.read_file(exp_file,calc_file,averaging=averaging,fit=fit,use_samples=use_samples,use_data=use_data)
         self._add_data(label,exp,calc,weight)
 
     def _add_data(self,label,exp,calc,weight):
-        if(len(self.experiment)!=0 and calc.shape[0]!=self.calculated.shape[0]):
-            raise ValueError("Number of samples (%d) differs from previously loaded data (%d)" % (calc.shape[0],self.calculated.shape[0]))
+        if not (np.isfinite(weight) and weight>0):
+            raise ValueError("weight must be a positive number")
+        if(len(self.experiment)!=0 and calc.shape[0]!=self.get_nsamples()):
+            raise ValueError("Number of samples (%d) differs from previously loaded data (%d)" % (calc.shape[0],self.get_nsamples()))
         # new data: standardization must be recomputed at the next fit
         self.standardized = False
         if(len(self.experiment)==0):
@@ -119,7 +162,7 @@ class Reweight:
             self.weights = np.ones(exp.shape[0])*weight
         else:
             self.experiment = np.vstack([self.experiment,exp])
-            self.calculated = np.hstack([self.calculated,calc])
+            self._blocks.append(np.ascontiguousarray(calc,dtype=np.float64))
             self.labels = np.hstack([self.labels,label])
             self.weights = np.hstack([self.weights,np.ones(exp.shape[0])*weight])
 
@@ -139,19 +182,8 @@ class Reweight:
             self.w0 = np.ones(calc.shape[0])/calc.shape[0]
         self._add_data(label,exp,calc,weight)
             
-    def load_xvg(self,xvg_file,target,sigma,column=1,label=None,bound=None,begin=None,end=None,weight=1):
-        """Load a single observable from a GROMACS .xvg file (e.g. gmx gyrate).
-
-        target, sigma: experimental value and its uncertainty, in the same
-            units as the .xvg file (nm for gmx gyrate).
-        column: data column of the .xvg file (1 = Rg for gmx gyrate).
-        bound: None (target is an average), "UPPER" (the average must not
-            exceed target) or "LOWER" (the average must not be below target).
-        begin, end: only use frames with begin <= time <= end (time units of
-            the .xvg file, usually ps).
-
-        Returns the times of the frames that are used.
-        """
+    @staticmethod
+    def _read_xvg_data(xvg_file,target,sigma,column=1,label=None,bound=None,begin=None,end=None,stride=1,use_samples=[]):
         if not np.isfinite(target) or not np.isfinite(sigma) or sigma<=0:
             raise ValueError("target must be a number and sigma a positive number")
         bounds = {None:0.,"UPPER":1.,"LOWER":-1.}
@@ -166,18 +198,58 @@ class Reweight:
         if not np.any(mask):
             raise ValueError("No frames of %s between begin=%s and end=%s" % (xvg_file,begin,end))
         time,values = time[mask],values[mask]
+        stride = int(stride)
+        if stride<1:
+            raise ValueError("stride must be a positive integer")
+        time,values = time[::stride],values[::stride]
+        if(len(use_samples)!=0):
+            time,values = time[use_samples],values[use_samples]
 
         if label is None:
             label = legend if legend else "%s:%d" % (os.path.basename(xvg_file),column)
         exp = np.array([[float(target),float(sigma),bounds[key]]])
         calc = values.reshape(-1,1)
+        log = "# Reading column %d (%s) of %s: %d frames (time %g to %g, stride %d) \n" % (column,label,xvg_file,len(time),time[0],time[-1],stride)
+        log += "# Target %g, sigma %g, bound %s \n" % (target,sigma,key)
+        return np.array([label]),exp,calc,time,log
 
-        self.log.write("# Reading column %d (%s) of %s: %d frames (time %g to %g) \n" % (column,label,xvg_file,len(time),time[0],time[-1]))
-        self.log.write("# Target %g, sigma %g, bound %s \n" % (target,sigma,key))
-        self.load_array([label],exp,calc,weight=weight)
-        self.log.write(bt.check_data(np.array([label]),exp,calc,self.w0))
+    def load_xvg(self,xvg_file,target,sigma,column=1,label=None,bound=None,begin=None,end=None,stride=1,use_samples=[],weight=1):
+        """Load a single observable from a GROMACS .xvg file (e.g. gmx gyrate).
+
+        target, sigma: experimental value and its uncertainty, in the same
+            units as the .xvg file (nm for gmx gyrate).
+        column: data column of the .xvg file (1 = Rg for gmx gyrate).
+        bound: None (target is an average), "UPPER" (the average must not
+            exceed target) or "LOWER" (the average must not be below target).
+        begin, end: only use frames with begin <= time <= end (time units of
+            the .xvg file, usually ps).
+        stride: use one frame every stride (applied after begin/end), e.g. when
+            other data (chemical shifts...) were computed every stride frames.
+        use_samples: indices of the frames to use (applied after begin/end/stride).
+        weight: relative importance of this data point (see load).
+
+        Returns the times of the frames that are used.
+        """
+        labels,exp,calc,time,log = self._read_xvg_data(xvg_file,target,sigma,column=column,label=label,bound=bound,
+                                                       begin=begin,end=end,stride=stride,use_samples=use_samples)
+        self.log.write(log)
+        self._check_w0(calc.shape[0],xvg_file)
+        self.load_array(labels,exp,calc,weight=weight)
+        self.log.write(bt.check_data(labels,exp,calc,self.w0))
         self.log.flush()
         return time
+
+    def predict_xvg(self,xvg_file,target,sigma,column=1,label=None,bound=None,begin=None,end=None,stride=1,use_samples=[],outfile=None):
+        """Statistics for one observable of a GROMACS .xvg file with the initial
+        and optimized weights (same output as predict). Frame selection options
+        are the same as in load_xvg."""
+        labels,exp,calc,time,log = self._read_xvg_data(xvg_file,target,sigma,column=column,label=label,bound=bound,
+                                                       begin=begin,end=end,stride=stride,use_samples=use_samples)
+        self.log.write(log)
+        self._check_w0(calc.shape[0],xvg_file)
+        stats,log = bt.calc_stats(labels,exp,calc,self.w0,self.w_opt,averaging="linear",fit="no",outfile=outfile)
+        self.log.write(log)
+        return stats
 
     def predict(self,exp_file,calc_file,outfile=None,averaging="auto",fit='no',use_samples=[],use_data=[]):
 
@@ -207,7 +279,7 @@ class Reweight:
         return self.niter
 
     def get_nsamples(self):
-        return self.calculated.shape[0]
+        return self._blocks[0].shape[0]
 
     def get_ndata(self):
         return self.experiment.shape[0]
@@ -218,8 +290,17 @@ class Reweight:
     def get_experiment(self):
         return np.copy(self.experiment)
     
-    def get_calculated(self):
-        return np.copy(self.calculated)
+    # copy of the calculated data; columns: optional list of data indices
+    def get_calculated(self,columns=None):
+        if columns is None:
+            return np.copy(self.calculated)
+        cols = []
+        for j in np.atleast_1d(columns):
+            j = int(j) % self.get_ndata()
+            for b,sl in zip(self._blocks,self._slices()):
+                if sl.start<=j<sl.stop:
+                    cols.append(b[:,j-sl.start])
+        return np.column_stack(cols)
 
     def get_name(self):
         return self.name
@@ -245,30 +326,49 @@ class Reweight:
         if len(self.experiment)==0:
             raise ValueError("No data loaded. Call load() or load_array() before fit()")
 
-        # Standardize a copy of the data, so that self.experiment/self.calculated
-        # always hold the original (non-standardized) values. This makes it safe
-        # to call load() again after fit(): the standardization is recomputed.
+        # The optimization works on z-score standardized data, x -> (x-v1)/v2.
+        # The calculated data are NOT copied or modified: products with the
+        # standardized matrix are computed from the original one, so that
+        # memory use stays at one copy of the data (important for long
+        # trajectories) and self.experiment/self.calculated keep their values.
+        # The standardization is recomputed when data are added (load after fit).
         if(self.standardized==False):
+            v1 = np.zeros(self.experiment.shape[0])
+            v2 = np.ones(self.experiment.shape[0])
+            for b,sl in zip(self._blocks,self._slices()):
+                log,v1[sl],v2[sl] = bt.standardization(self.experiment[sl],b,self.w0,normalize="zscore")
             exp_std = np.array(self.experiment,dtype=float)
-            calc_std = np.array(self.calculated,dtype=float)
-            log,v1,v2 = bt.standardize(exp_std,calc_std,self.w0,normalize="zscore")
-            self._exp_std = exp_std
-            self._calc_std = calc_std
+            exp_std[:,0] = (exp_std[:,0]-v1)/v2
+            exp_std[:,1] = exp_std[:,1]/v2
+            self._exp_std,self._v1,self._v2 = exp_std,v1,v2
             self.standardized=True
         exp = self._exp_std
-        calc = self._calc_std
+        nsamples = self.get_nsamples()
+        v1,v2 = self._v1,self._v2
+        logw0 = np.log(self.w0)
+        # relative importance of each data point (see load)
+        data_weights = np.asarray(self.weights,dtype=float)
+
+        def calc_dot(vec):
+            # (standardized calc) @ vec, for vec of length ndata
+            vv = vec/v2
+            return self._calc_dot(vv)-np.dot(v1,vv)
+
+        def avg_std(ww):
+            # standardized weighted averages
+            return (self.calc_averages(ww)-v1*np.sum(ww))/v2
 
         def maxent(lambdas):
             # weights
             # tmax is a constant shift: it cancels in the weights but it is kept
             # in the objective because L-BFGS-B's relative stopping criterion
             # depends on |f|; removing it would change converged results.
-            arg = -np.sum(lambdas[np.newaxis,:]*calc,axis=1)-tmax+np.log(self.w0)
+            arg = -calc_dot(lambdas)-tmax+logw0
 
             logz = logsumexp(arg)
             ww = np.exp(arg-logz)
 
-            avg = np.sum(ww[:,np.newaxis]*calc, axis=0)
+            avg = avg_std(ww)
 
             # gaussian integral
             eps2 = 0.5*np.sum((lambdas*lambdas)*theta_sigma2)
@@ -285,9 +385,9 @@ class Reweight:
 
         def func_ber_gauss(w):
 
-            bcalc = np.sum(w[:,np.newaxis]*calc,axis=0)
+            bcalc = avg_std(w)
             diff = bcalc-exp[:,0]
-            chi2_half =  0.5*np.sum(((diff/exp[:,1])**2))
+            chi2_half =  0.5*np.sum(data_weights*(diff/exp[:,1])**2)
 
             idxs = np.where(w>1.0E-50)
             log_div = np.zeros(w.shape[0])
@@ -303,29 +403,31 @@ class Reweight:
 
         def func_chi2_L2(w):
             # 0.5*sum_i ((<calc_i>_w - exp_i)/sigma_i)^2 and its gradient wrt w
-            bcalc = np.sum(w[:,np.newaxis]*calc,axis=0)
+            bcalc = avg_std(w)
             diff = (bcalc-exp[:,0])/exp[:,1]
             diff *= bound_mask(diff)
-            chi2_half =  0.5*np.sum(diff**2)
-            jac = np.dot(calc,diff/exp[:,1])
+            chi2_half =  0.5*np.sum(data_weights*diff**2)
+            jac = calc_dot(data_weights*diff/exp[:,1])
             return chi2_half,jac
 
         def func_chi2_L1(w):
             # sum_i |<calc_i>_w - exp_i|/sigma_i and its (sub)gradient wrt w
-            bcalc = np.sum(w[:,np.newaxis]*calc,axis=0)
+            bcalc = avg_std(w)
             diff = (bcalc-exp[:,0])/exp[:,1]
             diff *= bound_mask(diff)
-            chi1 =  np.sum(np.abs(diff))
-            jac = np.dot(calc,np.sign(diff)/exp[:,1])
+            chi1 =  np.sum(data_weights*np.abs(diff))
+            jac = calc_dot(data_weights*np.sign(diff)/exp[:,1])
             return chi1,jac
 
         if(lambdas_init==True):
-            lambdas=np.zeros(exp.shape[0],dtype=np.longdouble)
+            # float64: with np.longdouble scipy keeps the extended type and all
+            # products with the (nsamples x ndata) matrix bypass BLAS (~50x slower)
+            lambdas=np.zeros(exp.shape[0],dtype=np.float64)
             self.log.write("Lagrange multipliers initialized from zero\n")
         else:
             if len(self.lambdas)!=exp.shape[0]:
                 raise ValueError("Warm start requires lambdas from a previous fit on the same data (%d lambdas, %d data)" % (len(self.lambdas),exp.shape[0]))
-            lambdas = np.copy(self.lambdas)
+            lambdas = np.array(self.lambdas,dtype=np.float64)
             self.log.write("Warm start\n")
 
         bounds = []
@@ -338,13 +440,17 @@ class Reweight:
                 bounds.append([0.0,None])
 
         if(method=="BME"):
-            opt={'maxiter':50000}
+            # tight tolerances: with the scipy defaults L-BFGS-B can stop before
+            # convergence on ill-conditioned problems (e.g. SAXS), and the result
+            # then depends on round-off (numpy/scipy version, float precision)
+            opt={'maxiter':50000,'ftol':1e-12,'gtol':1e-9}
             tmax = np.log((sys.float_info.max)/5.)
 
-            theta_sigma2 = theta*self.weights*exp[:,1]**2
+            # a data point with weight k counts k times in chi2: sigma^2 -> sigma^2/k
+            theta_sigma2 = theta*exp[:,1]**2/data_weights
 
-            chi2_before  = bt.calc_chi(exp,calc,self.w0)
-            self.log.write("Optimizing %d data and %d samples. Theta=%f \n" % (exp.shape[0],calc.shape[0],theta))
+            chi2_before  = bt.calc_chi_avg(exp,avg_std(self.w0))
+            self.log.write("Optimizing %d data and %d samples. Theta=%f \n" % (exp.shape[0],nsamples,theta))
             self.log.write("CHI2 before optimization: %8.4f \n" % (chi2_before))
             self.log.flush()
             mini_method = "L-BFGS-B"
@@ -358,13 +464,13 @@ class Reweight:
             if(result.success):
                 self.log.write("Minimization using %s successful (iterations:%d)\n" % (mini_method,result.nit))
                 # normalized weights computed in log space (no under/overflow)
-                arg = -np.sum(result.x[np.newaxis,:]*calc,axis=1) + np.log(self.w0)
+                arg = -calc_dot(result.x) + logw0
                 w_opt = np.exp(arg-logsumexp(arg))
                 w_opt /= np.sum(w_opt)
                 self.lambdas = np.copy(result.x)
                 self.w_opt = np.copy(w_opt)
                 self.niter = result.nit
-                chi2_after  = bt.calc_chi(exp,calc,w_opt)
+                chi2_after  = bt.calc_chi_avg(exp,avg_std(w_opt))
                 phi = np.exp(-bt.srel(self.w0,w_opt))
 
                 self.log.write("CHI2 after optimization: %8.4f \n" % (chi2_after))
@@ -393,8 +499,8 @@ class Reweight:
             func,use_jac = func_chi2_L1,True
             opt={'maxiter':2000,'disp': False,'ftol':1.0e-12}
 
-        chi2_before  = bt.calc_chi(exp,calc,self.w0)
-        self.log.write("Optimizing %d data and %d samples with %s. Theta=%f \n" % (exp.shape[0],calc.shape[0],method,theta))
+        chi2_before  = bt.calc_chi_avg(exp,avg_std(self.w0))
+        self.log.write("Optimizing %d data and %d samples with %s. Theta=%f \n" % (exp.shape[0],nsamples,method,theta))
         self.log.write("CHI2 before optimization: %8.4f \n" % (chi2_before))
         self.log.flush()
         start_time = time.time()
@@ -406,7 +512,7 @@ class Reweight:
             w_opt = np.clip(result.x,0.,None)
             w_opt /= np.sum(w_opt)
             self.w_opt = np.copy(w_opt)
-            chi2_after  = bt.calc_chi(exp,calc,w_opt)
+            chi2_after  = bt.calc_chi_avg(exp,avg_std(w_opt))
             phi = np.exp(-bt.srel(self.w0,w_opt))
             self.log.write("CHI2 after optimization: %8.4f \n" % (chi2_after))
             self.log.write("Fraction of effective frames: %8.4f \n" % (phi))
@@ -539,7 +645,7 @@ class Reweight:
         #self.log.write("acascacasacas\n")
         for it in range(iterations):
             
-            calc_avg = np.sum(calc*current_weights[:,np.newaxis],axis=0)
+            calc_avg = bt.wavg(calc,current_weights)
 
             model = LinearRegression(fit_intercept=offset)
             model.fit(calc_avg.reshape(-1,1),exp[:,0],inv_var)
