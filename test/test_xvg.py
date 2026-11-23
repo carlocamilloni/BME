@@ -1,11 +1,10 @@
-"""Tests for reweighting a single observable from a GROMACS .xvg file (bme-rg)."""
+"""Tests for reweighting with observables read from GROMACS .xvg files (load_xvg)."""
 import os
 
 import numpy as np
 import pytest
 
 import BME
-import BME_rg
 import BME_tools as bt
 
 HEADER = """# This file was created by the test-suite
@@ -129,47 +128,6 @@ def test_load_xvg_combines_with_other_data(gyrate):
     c0, c1, phi = rew.fit(1.0)
     assert c1 < c0
 
-
-# ------------------------------------------------------------ command line
-def test_cli_writes_weights(gyrate, capsys):
-    path, time, rg = gyrate
-    assert BME_rg.main([path, "--target", "16", "--sigma", "0.2", "--target-units", "A",
-                        "--theta", "2", "--out", "res", "--plot"]) == 0
-    out = capsys.readouterr().out
-    assert "target (average)   1.6000 +/- 0.0200 nm" in out
-    data = np.loadtxt("res.weights.dat")
-    np.testing.assert_allclose(data[:, 0], time)
-    assert data[:, 1].sum() == pytest.approx(1.0, abs=1e-6)
-    # same result as the library
-    rew = BME.Reweight("ref")
-    rew.load_xvg(path, 1.6, 0.02)
-    rew.fit(2.0)
-    np.testing.assert_allclose(data[:, 1], rew.get_weights(), rtol=1e-6)
-    assert os.path.exists("res.png") and os.path.exists("res.log")
-
-
-def test_cli_scan_and_w0(gyrate, tmp_path, capsys):
-    path, time, rg = gyrate
-    w0 = tmp_path / "w0.dat"
-    np.savetxt(w0, np.column_stack([time, np.ones(len(time))]))
-    assert BME_rg.main([path, "--target", "1.6", "--sigma", "0.02", "--scan", "--w0", str(w0)]) == 0
-    out = capsys.readouterr().out
-    assert "(prior)" in out and "N_eff" in out
-    lines = [l for l in out.splitlines() if l.strip().startswith(("0.01", "1e+03"))]
-    assert len(lines) == 2
-
-
-def test_cli_warns_when_target_outside_sampled_range(gyrate, capsys):
-    path, *_ = gyrate
-    assert BME_rg.main([path, "--target", "5.0", "--sigma", "0.1", "--theta", "10"]) == 0
-    assert "outside the range" in capsys.readouterr().out
-
-
-def test_cli_reports_errors(tmp_path, capsys):
-    assert BME_rg.main([str(tmp_path / "missing.xvg"), "--target", "1", "--sigma", "0.1"]) == 1
-    assert "Error" in capsys.readouterr().err
-
-
 # ------------------------------------------------------------ combined with other data
 def write_cs(tmp_path, rg, ncs=6, stride=1, seed=3, name="cs"):
     rng = np.random.default_rng(seed)
@@ -227,21 +185,18 @@ def test_xvg_stride_matches_subsampled_chemical_shifts(gyrate, tmp_path):
     np.testing.assert_allclose(t2, time[50::2][[0, 1, 5]])
 
 
-def test_cli_with_chemical_shifts(gyrate, tmp_path, capsys):
-    path, time, rg = gyrate
-    e, c, calc = write_cs(tmp_path, rg, stride=4)
-    assert BME_rg.main([path, "--target", "1.6", "--sigma", "0.02", "--stride", "4", "--data", e, c,
-                        "--rg-weight", "5", "--theta", "2", "--scan", "--out", "combo"]) == 0
-    out = capsys.readouterr().out
-    assert "additional data    cs_exp.dat: 6 data points" in out
-    assert "chi2 cs_exp.dat" in out and "chi2 all data" in out
-    data = np.loadtxt("combo.weights.dat")
-    np.testing.assert_allclose(data[:, 0], time[::4])
-    ref = BME.Reweight("ref")
-    ref.load_xvg(path, 1.6, 0.02, stride=4, weight=5)
-    ref.load(e, c)
-    ref.fit(2.0)
-    np.testing.assert_allclose(data[:, 1], ref.get_weights(), rtol=1e-6)
-    # mismatching frames: clear error, no traceback
-    assert BME_rg.main([path, "--target", "1.6", "--sigma", "0.02", "--data", e, c]) == 1
-    assert "same frames" in capsys.readouterr().err
+
+def test_example_06_data():
+    # the synthetic data of notebook/example_06.ipynb
+    from conftest import DATA_DIR
+    xvg = os.path.join(DATA_DIR, "rg_example.xvg")
+    cs_exp = os.path.join(DATA_DIR, "cs_example_exp.dat")
+    cs_calc = os.path.join(DATA_DIR, "cs_example_calc.dat.zip")
+    rew = BME.Reweight("ex06")
+    rew.load(cs_exp, cs_calc)
+    time = rew.load_xvg(xvg, 1.60, 0.05, stride=5, weight=5)
+    assert len(time) == rew.get_nsamples() == 1000
+    chi2_before, chi2_after, phi = rew.fit(3)
+    assert chi2_after < 0.1 * chi2_before
+    stats = rew.predict_xvg(xvg, 1.60, 0.05, stride=5)
+    assert stats[3] < 0.1

@@ -6,8 +6,9 @@ New features
 - `BME_tools.read_xvg` reads GROMACS `.xvg` files; `Reweight.load_xvg` loads a single
   observable (e.g. the radius of gyration from `gmx gyrate`) with a target value and error,
   optionally as an upper/lower bound and on a time window.
-- `bme-rg` command: reweights towards a target radius of gyration, prints a theta scan,
-  writes the weights (time, weight) and optionally a plot of the Rg distributions.
+- `notebook/example_06.ipynb`: reweighting towards a target radius of gyration from
+  `gmx gyrate`, alone and together with chemical shifts (synthetic data in `data/rg_example.xvg`,
+  `data/cs_example_exp.dat`, `data/cs_example_calc.dat.zip`).
 
 Combining datasets and long trajectories
 - The `weight` argument of `load`/`load_array` acted in the opposite direction (weight=10
@@ -17,9 +18,6 @@ Combining datasets and long trajectories
 - `load_xvg`: `stride` and `use_samples`, to match data computed on a subsampled
   trajectory; `predict_xvg` gives Rg statistics after a fit. Datasets with different numbers
   of frames give an error that says so (it wrongly mentioned the initial weights w0).
-- `bme-rg`: `--data EXP CALC` (repeatable) to reweight Rg together with chemical shifts or
-  other data, `--stride`, `--rg-weight`; chi2 is reported for each dataset; the data are
-  loaded once for the theta scan.
 - Memory and speed for large data (e.g. 1.25e6 frames x 250 chemical shifts, 2.3 GB):
   - Lagrange multipliers were `np.longdouble`, so every product with the data matrix
     bypassed BLAS (about 50x slower) and temporaries were 16 bytes per element.

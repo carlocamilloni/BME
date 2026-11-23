@@ -8,6 +8,7 @@
 # .dat files in examples
 examples/*.dat
 notebook/*.dat
+notebook/*.log
 notebook/.ipynb_checkpoints
 
 

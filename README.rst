@@ -79,49 +79,49 @@ Tests run in temporary folders, so they do not leave log files in the repository
 Reweighting towards a target radius of gyration (GROMACS)
 -----------
 
-A single observable computed with GROMACS, for example the radius of gyration from
-``gmx gyrate``, can be used directly with the ``bme-rg`` command (installed with BME)
+Observables computed with GROMACS, for example the radius of gyration (Rg) from
+``gmx gyrate``, can be loaded directly from the ``.xvg`` file with ``Reweight.load_xvg``,
+giving the experimental value and its error (in nm, the units of ``gmx gyrate``)
 
 ::
 
-    gmx gyrate -f traj.xtc -s topol.tpr -o gyrate.xvg
-    bme-rg gyrate.xvg --target 1.85 --sigma 0.05 --scan     # choose theta
-    bme-rg gyrate.xvg --target 1.85 --sigma 0.05 --theta 2 --plot
-
-``--target`` and ``--sigma`` are in nm, like the ``.xvg`` file (use ``--target-units A``
-for Angstrom). The weights are written to ``gyrate.weights.dat`` (columns: time, weight).
-Other options: ``--begin``/``--end`` (time window, ps), ``--bound upper|lower``,
-``--column`` (data column of the ``.xvg``), ``--w0`` (initial weights), ``--out`` (prefix).
-With ``--scan`` a table of the reweighted average, chi2 and fraction of effective frames
-(phi) for a range of theta values is printed: with a single target value cross-validation
-is not possible, so choose the largest theta whose average is close enough to the target.
-
-Rg can be combined with other data in BME format, e.g. chemical shifts. The rows of the
-calculated file must be the same frames as the ``.xvg`` frames that are used: if the chemical
-shifts were computed every 10 frames, use ``--stride 10``. With many chemical shifts and a
-single Rg, ``--rg-weight`` sets how many data points the Rg counts for
-
-::
-
-    bme-rg gyrate.xvg --target 1.85 --sigma 0.05 --stride 10 \
-           --data cs_exp.dat cs_calc.dat --rg-weight 10 --scan
-
-From Python the same is done with ``Reweight.load_xvg`` (options ``begin``, ``end``, ``stride``,
-``use_samples``, ``weight``), and ``predict_xvg`` reports the Rg statistics after the fit
-
-::
-
+    import numpy as np
     import BME
+
+    # gmx gyrate -f traj.xtc -s topol.tpr -o gyrate.xvg
+    rew = BME.Reweight("rg")
+    time = rew.load_xvg("gyrate.xvg", target=1.60, sigma=0.05)
+    rg = rew.get_calculated()[:, 0]
+
+    # with a single data point cross-validation is not possible: look at how the
+    # average and the fraction of effective frames (phi) change with theta, and take
+    # the largest theta with |<Rg> - target|/sigma < 1
+    for theta in [0.1, 0.3, 1, 3, 10, 30, 100]:
+        chi2_before, chi2_after, phi = rew.fit(theta=theta)
+        print(theta, np.dot(rew.get_weights(), rg), phi)
+
+    rew.fit(theta=3)
+    np.savetxt("weights.dat", np.column_stack([time, rew.get_weights()]))
+
+Other options of ``load_xvg``: ``column`` (default 1, the total Rg), ``bound="UPPER"``/``"LOWER"``,
+``begin``/``end`` (time window), ``stride`` and ``use_samples`` (frame selection).
+
+Rg can be combined with other data, e.g. chemical shifts. All datasets must refer to the same
+frames: if the chemical shifts were computed every 10 frames, use ``stride=10``. The ``weight``
+of a dataset (in ``load``, ``load_array`` and ``load_xvg``) is its relative importance: a data
+point with weight k counts as k data points, i.e. as if its error were divided by sqrt(k).
+This is useful to balance a single Rg against many chemical shifts
+
+::
+
     rew = BME.Reweight("rg_cs")
     rew.load("cs_exp.dat", "cs_calc.dat")
-    rew.load_xvg("gyrate.xvg", target=1.85, sigma=0.05, stride=10, weight=10)
-    chi2_before, chi2_after, phi = rew.fit(theta=2)
-    weights = rew.get_weights()
-    rg_stats = rew.predict_xvg("gyrate.xvg", 1.85, 0.05, stride=10)
+    rew.load_xvg("gyrate.xvg", target=1.60, sigma=0.05, stride=10, weight=5)
+    chi2_before, chi2_after, phi = rew.fit(theta=3)
+    stats_cs = rew.predict("cs_exp.dat", "cs_calc.dat")
+    stats_rg = rew.predict_xvg("gyrate.xvg", 1.60, 0.05, stride=10)
 
-The ``weight`` of a dataset (in ``load``, ``load_array`` and ``load_xvg``) is its relative
-importance: a data point with weight k counts as k data points, i.e. as if its error were
-divided by sqrt(k).
+A complete example, with synthetic data, is in ``notebook/example_06.ipynb``.
 
 
 Examples
@@ -140,6 +140,7 @@ Some notebooks read the uncompressed calculated data, so unzip them first:
 - Example_03: How to handle different types of data simultaneously
 - Example_04: Iterative BME (iBME)
 - Example_05: How to set non-uniform initial weights
+- Example_06: Reweighting towards a target radius of gyration from GROMACS, alone and with chemical shifts
 
 
 BME has been used in several integrative studies, including:
