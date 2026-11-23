@@ -1,7 +1,7 @@
 """Regression tests: results on the example datasets in data/ must not change.
 
 Reference numbers were produced with the original code (numpy 1.x) and are
-reproduced by the current version with both numpy 1.x and 2.x.
+reproduced by the current version.
 """
 import os
 import numpy as np

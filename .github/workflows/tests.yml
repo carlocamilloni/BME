@@ -8,35 +8,36 @@ on:
 
 jobs:
   test:
-    name: py${{ matrix.python-version }} ${{ matrix.deps }}
+    name: py${{ matrix.python-version }} ${{ matrix.os }} ${{ matrix.deps }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
         deps: ["latest"]
         include:
-          # oldest supported stack (numpy 1.x)
+          # oldest supported versions of the dependencies
           - os: ubuntu-latest
-            python-version: "3.9"
-            deps: "numpy<2"
+            python-version: "3.11"
+            deps: "oldest"
           - os: macos-latest
-            python-version: "3.12"
+            python-version: "3.14"
             deps: "latest"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          if [ "${{ matrix.deps }}" = "latest" ]; then
-            python -m pip install ".[test]"
+          if [ "${{ matrix.deps }}" = "oldest" ]; then
+            python -m pip install ".[test]" "numpy==2.0.*" "scipy==1.13.*" "pandas==2.2.2" \
+                                  "scikit-learn==1.4.2" "matplotlib==3.8.4"
           else
-            python -m pip install ".[test]" "${{ matrix.deps }}"
+            python -m pip install ".[test]"
           fi
       - name: Run tests
         run: python -m pytest

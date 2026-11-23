@@ -34,8 +34,10 @@ Combining datasets and long trajectories
 Packaging
 - `pyproject.toml`: BME can be installed with `pip install .` (modules `BME` and
   `BME_tools`, so `import BME` works unchanged). Optional extras `[test]` and `[notebooks]`.
+- Requires Python >= 3.11 and NumPy >= 2 (with scipy >= 1.13, pandas >= 2.2.2,
+  scikit-learn >= 1.4.2, matplotlib >= 3.8.4, the first versions built for NumPy 2).
 - `environment.yml` for conda; GitHub Actions workflow (`.github/workflows/tests.yml`)
-  testing Python 3.9–3.13, NumPy 1.x and 2.x, Linux and macOS.
+  testing Python 3.11–3.15 on Linux, 3.14 on macOS, and the oldest supported dependencies.
 - `.travis.yml` updated: the old one installed the `sklearn` placeholder package,
   which now refuses to install, and targeted Python 3.4–3.8.
 - `matplotlib` is imported only when `theta_scan`/`iterative_theta_scan` are used.

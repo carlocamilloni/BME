@@ -25,9 +25,9 @@ The correction comes in the form of a new set of weights, one per frame in your 
 Requirements 
 ------------
 
-1) Python>=3.9
+1) Python>=3.11
 
-2) Numpy, Scipy, scikit-learn, Pandas, Matplotlib (installed automatically, see below)
+2) Numpy>=2, Scipy, scikit-learn, Pandas, Matplotlib (installed automatically, see below)
 
 3) Jupyter (for notebooks only)
   
