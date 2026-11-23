@@ -139,6 +139,46 @@ class Reweight:
             self.w0 = np.ones(calc.shape[0])/calc.shape[0]
         self._add_data(label,exp,calc,weight)
             
+    def load_xvg(self,xvg_file,target,sigma,column=1,label=None,bound=None,begin=None,end=None,weight=1):
+        """Load a single observable from a GROMACS .xvg file (e.g. gmx gyrate).
+
+        target, sigma: experimental value and its uncertainty, in the same
+            units as the .xvg file (nm for gmx gyrate).
+        column: data column of the .xvg file (1 = Rg for gmx gyrate).
+        bound: None (target is an average), "UPPER" (the average must not
+            exceed target) or "LOWER" (the average must not be below target).
+        begin, end: only use frames with begin <= time <= end (time units of
+            the .xvg file, usually ps).
+
+        Returns the times of the frames that are used.
+        """
+        if not np.isfinite(target) or not np.isfinite(sigma) or sigma<=0:
+            raise ValueError("target must be a number and sigma a positive number")
+        bounds = {None:0.,"UPPER":1.,"LOWER":-1.}
+        key = bound.upper() if isinstance(bound,str) else bound
+        if key not in bounds:
+            raise ValueError("bound must be None, 'UPPER' or 'LOWER'")
+
+        time,values,legend = bt.read_xvg(xvg_file,column=column)
+        mask = np.ones(len(time),dtype=bool)
+        if begin is not None: mask &= (time>=begin)
+        if end is not None: mask &= (time<=end)
+        if not np.any(mask):
+            raise ValueError("No frames of %s between begin=%s and end=%s" % (xvg_file,begin,end))
+        time,values = time[mask],values[mask]
+
+        if label is None:
+            label = legend if legend else "%s:%d" % (os.path.basename(xvg_file),column)
+        exp = np.array([[float(target),float(sigma),bounds[key]]])
+        calc = values.reshape(-1,1)
+
+        self.log.write("# Reading column %d (%s) of %s: %d frames (time %g to %g) \n" % (column,label,xvg_file,len(time),time[0],time[-1]))
+        self.log.write("# Target %g, sigma %g, bound %s \n" % (target,sigma,key))
+        self.load_array([label],exp,calc,weight=weight)
+        self.log.write(bt.check_data(np.array([label]),exp,calc,self.w0))
+        self.log.flush()
+        return time
+
     def predict(self,exp_file,calc_file,outfile=None,averaging="auto",fit='no',use_samples=[],use_data=[]):
 
         label,exp,calc,log,averaging = bt.parse(exp_file,calc_file,averaging=averaging)

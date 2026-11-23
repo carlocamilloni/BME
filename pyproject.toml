@@ -33,13 +33,16 @@ classifiers = [
 test = ["pytest>=7"]
 notebooks = ["jupyter"]
 
+[project.scripts]
+bme-rg = "BME_rg:main"
+
 [project.urls]
 Homepage = "https://github.com/KULL-Centre/BME"
 
 [tool.setuptools]
 # BME is distributed as two top-level modules, so that "import BME" keeps
 # working exactly as in the notebooks and in existing user scripts
-py-modules = ["BME", "BME_tools"]
+py-modules = ["BME", "BME_tools", "BME_rg"]
 
 [tool.setuptools.dynamic]
 version = { attr = "BME.__version__" }

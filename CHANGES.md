@@ -2,6 +2,13 @@
 
 ## 1.0.0 (unreleased)
 
+New features
+- `BME_tools.read_xvg` reads GROMACS `.xvg` files; `Reweight.load_xvg` loads a single
+  observable (e.g. the radius of gyration from `gmx gyrate`) with a target value and error,
+  optionally as an upper/lower bound and on a time window.
+- `bme-rg` command: reweights towards a target radius of gyration, prints a theta scan,
+  writes the weights (time, weight) and optionally a plot of the Rg distributions.
+
 Packaging
 - `pyproject.toml`: BME can be installed with `pip install .` (modules `BME` and
   `BME_tools`, so `import BME` works unchanged). Optional extras `[test]` and `[notebooks]`.

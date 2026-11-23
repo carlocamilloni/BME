@@ -9,6 +9,49 @@ averaging_types = ["linear","power_3","power_6","power_4"]
 fit_types = ["scale","scale+offset","no"]
 
 
+# read a GROMACS .xvg file (e.g. the output of gmx gyrate)
+def read_xvg(xvg_file,column=1):
+    """Read one column of a GROMACS .xvg file.
+
+    Lines starting with '#' or '@' are skipped; reading stops at the first '&'
+    (end of the first data set). Column 0 is the time, column 1 the first data
+    set (for gmx gyrate: the radius of gyration, in nm).
+
+    Returns (time, values, legend), where legend is the label that GROMACS
+    gives to the column (e.g. "Rg"), or None.
+    """
+    legends = {}
+    rows = []
+    ncols = None
+    with open(xvg_file) as fh:
+        for nline,line in enumerate(fh,1):
+            s = line.strip()
+            if not s or s[0]=="#":
+                continue
+            if s[0]=="@":
+                # e.g.: @ s0 legend "Rg"
+                fields = s[1:].split(None,2)
+                if len(fields)==3 and fields[0].startswith("s") and fields[0][1:].isdigit() and fields[1]=="legend":
+                    legends[int(fields[0][1:])+1] = fields[2].strip().strip('"')
+                continue
+            if s[0]=="&":
+                break
+            fields = s.split()
+            if ncols is None:
+                ncols = len(fields)
+                if column<1 or column>=ncols:
+                    raise ValueError("Column %d not available in %s: data lines have %d columns (0=time, 1..%d=data)" % (column,xvg_file,ncols,ncols-1))
+            elif len(fields)!=ncols:
+                raise ValueError("Line %d of %s has %d columns instead of %d" % (nline,xvg_file,len(fields),ncols))
+            try:
+                rows.append((float(fields[0]),float(fields[column])))
+            except ValueError:
+                raise ValueError("Cannot read numbers in line %d of %s" % (nline,xvg_file))
+    if len(rows)==0:
+        raise ValueError("No data found in %s" % xvg_file)
+    data = np.array(rows)
+    return data[:,0],data[:,1],legends.get(column)
+
 # calculate relative entropy
 def srel(w0,w1):
     idxs = np.where(w1>1.0E-50)

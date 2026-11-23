@@ -76,6 +76,37 @@ From the repository folder run
 Tests run in temporary folders, so they do not leave log files in the repository.
 
 
+Reweighting towards a target radius of gyration (GROMACS)
+-----------
+
+A single observable computed with GROMACS, for example the radius of gyration from
+``gmx gyrate``, can be used directly with the ``bme-rg`` command (installed with BME)
+
+::
+
+    gmx gyrate -f traj.xtc -s topol.tpr -o gyrate.xvg
+    bme-rg gyrate.xvg --target 1.85 --sigma 0.05 --scan     # choose theta
+    bme-rg gyrate.xvg --target 1.85 --sigma 0.05 --theta 2 --plot
+
+``--target`` and ``--sigma`` are in nm, like the ``.xvg`` file (use ``--target-units A``
+for Angstrom). The weights are written to ``gyrate.weights.dat`` (columns: time, weight).
+Other options: ``--begin``/``--end`` (time window, ps), ``--bound upper|lower``,
+``--column`` (data column of the ``.xvg``), ``--w0`` (initial weights), ``--out`` (prefix).
+With ``--scan`` a table of the reweighted average, chi2 and fraction of effective frames
+(phi) for a range of theta values is printed: with a single target value cross-validation
+is not possible, so choose the largest theta whose average is close enough to the target.
+
+From Python the same is done with ``Reweight.load_xvg``, which can be combined with other data
+
+::
+
+    import BME
+    rew = BME.Reweight("rg")
+    rew.load_xvg("gyrate.xvg", target=1.85, sigma=0.05)
+    chi2_before, chi2_after, phi = rew.fit(theta=2)
+    weights = rew.get_weights()
+
+
 Examples
 ------------
 
