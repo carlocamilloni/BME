@@ -25,25 +25,67 @@ The correction comes in the form of a new set of weights, one per frame in your 
 Requirements 
 ------------
 
-1) Python>=3.4
+1) Python>=3.9
 
-2) Numpy, Scipy, Sklearn, Pandas
+2) Numpy, Scipy, scikit-learn, Pandas, Matplotlib (installed automatically, see below)
 
-3) Jupyter and Matplotlib (for notebooks only)
+3) Jupyter (for notebooks only)
   
   
-Download 
+Installation 
 -----------
 
-You can download a .zip file by clicking on the green button above or using git
+Clone the repository (or download a .zip file by clicking on the green button above)
 
-`git clone https://github.com/sbottaro/BME.git`
+::
+
+    git clone https://github.com/KULL-Centre/BME.git
+    cd BME
+
+and install it in a virtual environment with pip
+
+::
+
+    python -m venv bme-env
+    source bme-env/bin/activate
+    pip install .            # or: pip install -e ".[test]" for development
+
+or create a conda environment, which also installs pytest and jupyter
+
+::
+
+    conda env create -f environment.yml
+    conda activate bme
+
+After installation ``import BME`` works from any directory. Without installing,
+you can still add the repository folder to ``sys.path``, as done in the notebooks.
+
+
+Testing
+-----------
+
+From the repository folder run
+
+::
+
+    pip install -e ".[test]"
+    python -m pytest
+
+``test/test_01.py`` checks that the results on the datasets in ``data/`` do not change,
+``test/test_tools.py`` and ``test/test_reweight.py`` contain unit tests on small synthetic problems.
+Tests run in temporary folders, so they do not leave log files in the repository.
 
 
 Examples
 ------------
 
 The `notebook` folder contains more detailed examples in form of jupyter notebooks. 
+Some notebooks read the uncompressed calculated data, so unzip them first:
+
+::
+
+    cd data && for f in *.zip; do unzip -o "$f"; done && cd ..
+
 
 - Example_01: Introduction
 - Example_02: How to chose the regularization parameter $\theta$

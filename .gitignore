@@ -13,3 +13,13 @@ notebook/.ipynb_checkpoints
 
 data/*calc.dat
 test/tmp
+
+# packaging / testing
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+__pycache__/
+
+# outputs written by Reweight in the working directory
+theta_scan/

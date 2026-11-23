@@ -1,9 +1,15 @@
-import sys,os
+"""Regression tests: results on the example datasets in data/ must not change.
+
+Reference numbers were produced with the original code (numpy 1.x) and are
+reproduced by the current version with both numpy 1.x and 2.x.
+"""
+import os
 import numpy as np
 import filecmp
 
-bme_dir = os.getcwd().split("test")[0]
-sys.path.append(bme_dir)
+from conftest import BME_DIR, REFERENCE_DIR
+
+bme_dir = BME_DIR
 
 import BME as BME
 tol = 1.E-03
@@ -43,7 +49,12 @@ calc_file_unoe = "%s/data/uNOE_calc.dat.zip" % bme_dir
 
 
 def calc_diff(vref,v):
-    return np.abs(np.max(np.array(vref)-np.array(v)))
+    # largest absolute deviation (the previous version, abs(max(diff)),
+    # silently accepted any negative deviation)
+    vref = np.asarray(vref,dtype=float)
+    v = np.asarray(v,dtype=float)
+    assert vref.shape == v.shape
+    return np.max(np.abs(vref-v))
 
 class TestClass:
     
@@ -144,19 +155,20 @@ class TestClass:
         #assert(calc_diff(results_four[2],stats2)<tol)
         print("...OK")
 
-    def test_six(self):
+    def test_six(self, tmp_path):
         
         print("TEST predict ",end="")
-        os.system("mkdir -p %s/test/tmp/" % bme_dir)
         rew = BME.Reweight("example_01")
         # load the experimental and calculated datasets
         rew.load(exp_file_3j,calc_file_3j)
         # fit the data 
         chi2_before, chi2_after, phi = rew.fit(theta=0.5)
-        stats = rew.predict(exp_file_3j,calc_file_3j,"%s/test/tmp/example_01_couplings" % bme_dir)
-        stats_noe = rew.predict(exp_file_noe,calc_file_noe,"%s/test/tmp/example_01_noe"% bme_dir)
-        filecmp.cmp("%s/test/reference/example_01_couplings" % bme_dir,"%s/test/tmp/example_01_couplings"% bme_dir)
-        filecmp.cmp("%s/test/reference/example_01_noe" % bme_dir ,"%s/test/tmp/example_01_noe"% bme_dir)
+        out_3j = str(tmp_path / "example_01_couplings")
+        out_noe = str(tmp_path / "example_01_noe")
+        stats = rew.predict(exp_file_3j,calc_file_3j,out_3j)
+        stats_noe = rew.predict(exp_file_noe,calc_file_noe,out_noe)
+        assert filecmp.cmp(os.path.join(REFERENCE_DIR,"example_01_couplings"),out_3j,shallow=False)
+        assert filecmp.cmp(os.path.join(REFERENCE_DIR,"example_01_noe"),out_noe,shallow=False)
         print("...OK")
         
     # test RDC

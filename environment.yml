@@ -1,0 +1,20 @@
+# Conda environment for BME.
+#   conda env create -f environment.yml
+#   conda activate bme
+# This installs the dependencies from conda-forge and BME itself (editable)
+# from this folder, plus pytest and jupyter for the tests and notebooks.
+name: bme
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.9
+  - numpy>=1.20
+  - scipy>=1.6
+  - pandas>=1.2
+  - scikit-learn>=0.24
+  - matplotlib>=3.3
+  - pytest>=7
+  - jupyter
+  - pip
+  - pip:
+      - -e .

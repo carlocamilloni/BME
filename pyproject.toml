@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "BME"
+dynamic = ["version"]
+description = "Bayesian/Maximum Entropy (BME) reweighting of molecular simulations with experimental data"
+readme = "README.rst"
+# GNU GPL v3, see LICENSE.md
+license-files = ["LICENSE.md"]
+authors = [
+    { name = "Sandro Bottaro" },
+    { name = "Tone Bengtsen" },
+    { name = "Kresten Lindorff-Larsen" },
+]
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.20",
+    "scipy>=1.6",
+    "pandas>=1.2",
+    "scikit-learn>=0.24",
+    "matplotlib>=3.3",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Intended Audience :: Science/Research",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+notebooks = ["jupyter"]
+
+[project.urls]
+Homepage = "https://github.com/KULL-Centre/BME"
+
+[tool.setuptools]
+# BME is distributed as two top-level modules, so that "import BME" keeps
+# working exactly as in the notebooks and in existing user scripts
+py-modules = ["BME", "BME_tools"]
+
+[tool.setuptools.dynamic]
+version = { attr = "BME.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+addopts = "-ra"

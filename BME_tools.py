@@ -19,13 +19,15 @@ def parse(exp_file,calc_file,averaging="auto"):
 
     log = ""
     # read experimental data 
-    fh = open(exp_file)
-    first = fh.readline()
-    assert first[0] == "#", "Error. First line of exp file %s must be in the format \# DATA=[%s] [BOUND=UPPER/LOWER]" % (exp_file,exp_types)
+    with open(exp_file) as fh:
+        first = fh.readline()
+    if not first.startswith("#") or "DATA=" not in first:
+        raise ValueError("Error. First line of exp file %s must be in the format # DATA=[%s] [BOUND=UPPER/LOWER]" % (exp_file,exp_types))
 
     # read data type
     data_string = (first.split("DATA=")[-1].split()[0]).strip()
-    assert data_string in exp_types , "Error. DATA in %s must be one of the following: %s " % (exp_file,exp_types)
+    if data_string not in exp_types:
+        raise ValueError("Error. DATA in %s must be one of the following: %s " % (exp_file,exp_types))
 
     log += "# Reading %s data \n" % (data_string)
         
@@ -33,21 +35,23 @@ def parse(exp_file,calc_file,averaging="auto"):
     bound_string=None
     if(len(first.split("BOUND="))==2):
         bound_string = (first.split("BOUND=")[-1].split()[0]).strip()
-        assert bound_string in bound_types , "Error. %s is not known. BOUND in %s must be one of the following: %s " % (bound_string,exp_file,bound_types)
+        if bound_string not in bound_types:
+            raise ValueError("Error. %s is not known. BOUND in %s must be one of the following: %s " % (bound_string,exp_file,bound_types))
         log += "# %s-bound data \n" % (bound_string)
         
-    df_exp = pd.read_csv(exp_file,sep="\s+",header=None,comment="#")
+    df_exp = pd.read_csv(exp_file,sep=r"\s+",header=None,comment="#")
         
-    assert df_exp.shape[1]==3, "Error. Experimental datafile must be in the format LABEL VALUE ERROR"
+    if df_exp.shape[1]!=3:
+        raise ValueError("Error. Experimental datafile %s must be in the format LABEL VALUE ERROR" % exp_file)
     df_exp = df_exp.rename(columns={0: "label", 1: "val",2:"sigma"})
         
     # read calculated datafile
-    df_calc = pd.read_csv(calc_file,sep="\s+",header=None,comment="#")
+    df_calc = pd.read_csv(calc_file,sep=r"\s+",header=None,comment="#")
     # Drop frame
     df_calc = df_calc.drop(columns=[0])
 
-    assert (df_calc.shape[1])==df_exp.shape[0],\
-        "Error: Number of experimental data in %s (%d) must match the calculated data in %s (%d)" % (exp_file,df_exp.shape[0],calc_file,df_calc.shape[1])
+    if (df_calc.shape[1])!=df_exp.shape[0]:
+        raise ValueError("Error: Number of experimental data in %s (%d) must match the calculated data in %s (%d)" % (exp_file,df_exp.shape[0],calc_file,df_calc.shape[1]))
 
     # write to log file
     log += "# Reading %d experimental data from %s \n" % (df_exp.shape[0],exp_file)
@@ -61,7 +65,8 @@ def parse(exp_file,calc_file,averaging="auto"):
         else:
             averaging = "linear"
     else:
-        assert averaging in averaging_types, "averaging type must be in %s " % (averaging_types)
+        if averaging not in averaging_types:
+            raise ValueError("averaging type must be in %s " % (averaging_types))
     log += "# Using %s averaging \n" % (averaging)
 
     if(averaging.split("_")[0]=="power"):
@@ -94,7 +99,8 @@ def parse(exp_file,calc_file,averaging="auto"):
 # perform linear regression 
 def fit_and_scale(exp,calc,sample_weights,fit):
 
-    assert fit in fit_types, "fit type must be in %s " % (fit_types)
+    if fit not in fit_types:
+        raise ValueError("fit type must be in %s " % (fit_types))
 
     calc_avg = np.sum(calc*sample_weights[:,np.newaxis],axis=0)
     log = "# Using %s scaling \n" % (fit)
@@ -112,13 +118,17 @@ def fit_and_scale(exp,calc,sample_weights,fit):
 
         reg = LinearRegression(fit_intercept=fit_intercept).fit(calc_avg.reshape(-1,1),exp_avg.reshape(-1,1),sample_weight=oversigma)
         r_value = reg.score(calc_avg.reshape(-1,1),exp_avg.reshape(-1,1),sample_weight=oversigma)
-        slope,intercept = reg.coef_[0],reg.intercept_
+        # coef_ has shape (1,1) and intercept_ shape (1,) because y is 2D:
+        # extract python floats (formatting 1-element arrays fails with numpy>=2)
+        slope = float(np.ravel(reg.coef_)[0])
+        intercept = float(np.ravel(reg.intercept_)[0])
                
+        # calc is modified in place on purpose (callers use the scaled array)
         calc *=slope
         calc +=intercept
 
-        calc_avg = np.sum(calc*sample_weights[:,np.newaxis],axis=0).reshape(-1,1)
-        log = "# Slope=%8.4f; Offset=%8.4f; r2=%8.4f \n" % (slope,intercept,r_value)
+        calc_avg = np.sum(calc*sample_weights[:,np.newaxis],axis=0)
+        log += "# Slope=%8.4f; Offset=%8.4f; r2=%8.4f \n" % (slope,intercept,r_value)
         return calc_avg,log
 
 
@@ -169,7 +179,8 @@ def check_data(label,exp,calc,sample_weights):
     diff *= ff #to_zero
     chi2 = np.average((diff/exp[:,1])**2)
     rmsd = np.sqrt(np.average(diff**2))
-    ii_out =  np.where(diff>1.)[0]
+    # data (not bounds) deviating by more than one sigma, in either direction
+    ii_out =  np.where((np.abs(diff/exp[:,1])>1.) & (exp[:,2]==0))[0]
     nviol += len(ii_out)
     log += "CHI2: %.5f \n" % chi2
     log += "RMSD: %.5f \n" % rmsd
@@ -220,7 +231,12 @@ def calc_diffs(exp_avg,exp_sigma,bounds,calc_avg):
 # calculate statistics
 def calc_stats(label,exp,calc,sample_weights0,sample_weights1,averaging,fit,outfile):
     
-    assert averaging in averaging_types, "averaging type must be in %s " % (averaging_types)
+    if averaging not in averaging_types:
+        raise ValueError("averaging type must be in %s " % (averaging_types))
+    if fit not in fit_types:
+        raise ValueError("fit type must be in %s " % (fit_types))
+    if len(sample_weights1)==0:
+        raise ValueError("Optimized weights are not available. Call fit() (or ibme()) before predict()")
     
     calc_avg0 = np.sum(calc*sample_weights0[:,np.newaxis],axis=0)
     calc_avg1 = np.sum(calc*sample_weights1[:,np.newaxis],axis=0)
@@ -238,10 +254,10 @@ def calc_stats(label,exp,calc,sample_weights0,sample_weights1,averaging,fit,outf
         #slope0, intercept0, r_value0, p_value0, std_err0 = linregress(calc_avg0[:,0],exp[:,0])
         #slope1, intercept1, r_value1, p_value1, std_err1 = linregress(calc_avg1[:,0],exp[:,0])
         reg0 = LinearRegression(fit_intercept=True).fit(calc_avg0.reshape(-1,1),exp_avg.reshape(-1,1),sample_weight=oversigma)
-        slope0,intercept0 = reg0.coef_[0],reg0.intercept_
+        slope0,intercept0 = float(np.ravel(reg0.coef_)[0]),float(np.ravel(reg0.intercept_)[0])
         
         reg1 = LinearRegression(fit_intercept=True).fit(calc_avg1.reshape(-1,1),exp_avg.reshape(-1,1),sample_weight=oversigma)
-        slope1,intercept1 = reg1.coef_[0],reg1.intercept_
+        slope1,intercept1 = float(np.ravel(reg1.coef_)[0]),float(np.ravel(reg1.intercept_)[0])
 
 
     log = "# Slope=%8.4f/%8.4f; Offset=%8.4f/%8.4f \n" % (slope0,slope1,intercept0,intercept1)
@@ -267,7 +283,7 @@ def calc_stats(label,exp,calc,sample_weights0,sample_weights1,averaging,fit,outf
     chi2_0,rmsd_0,nviol_0, viol_idx_0 = calc_diffs(exp_avg,exp_sigma,bounds,calc_avg0)
     chi2_1,rmsd_1,nviol_1, viol_idx_1 = calc_diffs(exp_avg,exp_sigma,bounds,calc_avg1)
 
-    if(outfile!=None):
+    if(outfile is not None):
         violation0 = [1 if k in viol_idx_0 else 0 for k in range(len(calc_avg0))]
         violation1 = [1 if k in viol_idx_1 else 0 for k in range(len(calc_avg1))] 
         violation = ["%d%d" % (i1,i2) for i1,i2 in zip(violation0,violation1)]
@@ -293,7 +309,6 @@ def calc_stats(label,exp,calc,sample_weights0,sample_weights1,averaging,fit,outf
 def standardize(exp,calc,sample_weights,normalize="zscore"):
 
     log = ""
-    #normalize="none"
     if(normalize=="zscore"):
         v1 = np.sum(calc*sample_weights[:,np.newaxis],axis=0)
         calc_var = np.average((v1-calc)**2, weights=sample_weights,axis=0)
@@ -318,18 +333,24 @@ def standardize(exp,calc,sample_weights,normalize="zscore"):
         calc -= mmin
         calc /= delta
         exp[:,1] /= delta
+        v1 = mmin
+        v2 = delta
         log += "# MinMax normalization \n"
-        #print(np.min(np.abs(delta)))
 
     # do not use this one
     elif(normalize=="bme"):
-        #if(np.abs(exp_data[l][0])>1.0E-05):
-        print("WHAT???")
-        ff = exp[:,0]
+        ff = np.copy(exp[:,0])
         exp[:,1] /= ff
         calc /= ff
         exp[:,0] /= ff
         v1 = 0
         v2 = ff
+        log += "# BME normalization \n"
+    elif(normalize=="none"):
+        v1 = 0.
+        v2 = 1.
+        log += "# No normalization \n"
+    else:
+        raise ValueError("normalize must be one of zscore, minmax, bme, none (got %s)" % normalize)
     return log,v1,v2
 

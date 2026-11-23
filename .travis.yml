@@ -1,20 +1,14 @@
+# Legacy Travis configuration, kept for the README badge.
+# The maintained CI is .github/workflows/tests.yml (GitHub Actions).
 language: python
 python:
-   - "3.4"	
-   - "3.5"	
-   - "3.6"
-   - "3.7"	
-   - "3.8"
-
+   - "3.9"
+   - "3.12"
 
 install:
-   - pip install numpy scipy 
-   - pip install nose2
-   - pip install pandas sklearn
-   - pip install matplotlib		
+   - pip install ".[test]"
 script:
-  # Your test script goes here
-  nose2
+   - python -m pytest
 branches:
   only:
   - main

@@ -4,19 +4,24 @@ import sys,os
 import time
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from scipy.optimize import minimize #version >0.13.0 for dogleg optimizer
-from scipy.stats import linregress
 from scipy.special import logsumexp
 from sklearn.linear_model import LinearRegression
-#import warnings
 import BME_tools as bt
-#import csv
 
-known_methods = ["BME","BER","CHI2_L2","CHI1_L1"]
+__version__ = "1.0.0"
+
+known_methods = ["BME","BER","CHI2_L2","CHI2_L1"]
+
+def _pyplot():
+    # matplotlib is only needed by theta_scan/iterative_theta_scan: import it
+    # lazily so that BME can be imported on headless machines without a display
+    import matplotlib
+    import matplotlib.pyplot as plt
+    return plt
 
 def progress(count, total, suffix=''):
-    total -= 1
+    total = max(total-1,1)
     bar_len = 60
     filled_len = int(round(bar_len * count / float(total)))
 
@@ -35,19 +40,40 @@ class Reweight:
         self.name = name
 
         if(len(w0)!=0):
+            w0 = np.array(w0,dtype=float)
+            if w0.ndim!=1 or np.any(w0<0) or not np.all(np.isfinite(w0)) or np.sum(w0)<=0:
+                raise ValueError("w0 must be a 1D array of non-negative, finite weights with positive sum")
             self.w0 = w0/np.sum(w0)
         else:
             self.w0= []
         
         self.w_opt = []
         self.lambdas = []
+        self.niter = None
         
         self.log = open("%s.log" % name, "w")
         
         self.labels = []
         self.experiment =  []
         self.calculated =  []
+        self.weights = []
         self.standardized = False
+
+    # the log file is kept open; close it explicitly, or use
+    # "with Reweight(name) as rew:" to close it automatically
+    def close(self):
+        if not self.log.closed:
+            self.log.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self,*args):
+        self.close()
+
+    def _check_w0(self,nsamples,where):
+        if(len(self.w0)!=0 and len(self.w0)!=nsamples):
+            raise ValueError("Number of initial weights w0 (%d) does not match the number of samples in %s (%d)" % (len(self.w0),where,nsamples))
         
     def read_file(self,exp_file,calc_file,averaging="auto",fit='no',use_samples=[],use_data=[]):
 
@@ -60,6 +86,7 @@ class Reweight:
         label,exp, calc, log = bt.subsample(label,exp,calc,use_samples,use_data)
         self.log.write(log)
 
+        self._check_w0(calc.shape[0],calc_file)
         if(len(self.w0)==0):
             self.w0 = np.ones(calc.shape[0])/calc.shape[0]
             self.log.write("Initialized uniform weights %d\n" % calc.shape[0])
@@ -78,7 +105,13 @@ class Reweight:
     def load(self,exp_file,calc_file,averaging="auto",fit='no',use_samples=[],use_data=[],weight=1):
         
         label,exp, calc = self.read_file(exp_file,calc_file,averaging=averaging,fit=fit,use_samples=use_samples,use_data=use_data)
+        self._add_data(label,exp,calc,weight)
 
+    def _add_data(self,label,exp,calc,weight):
+        if(len(self.experiment)!=0 and calc.shape[0]!=self.calculated.shape[0]):
+            raise ValueError("Number of samples (%d) differs from previously loaded data (%d)" % (calc.shape[0],self.calculated.shape[0]))
+        # new data: standardization must be recomputed at the next fit
+        self.standardized = False
         if(len(self.experiment)==0):
             self.experiment = exp
             self.calculated = calc
@@ -89,24 +122,22 @@ class Reweight:
             self.calculated = np.hstack([self.calculated,calc])
             self.labels = np.hstack([self.labels,label])
             self.weights = np.hstack([self.weights,np.ones(exp.shape[0])*weight])
-        
-        # note to self: implement weight
 
     # add data from external array
     def load_array(self,label,exp,calc,weight=1):
-        
-        if(len(self.experiment)==0):
-            self.experiment = exp
-            self.calculated = calc
-            self.labels = label
-            if(len(self.w0)==0):
-                self.w0 = np.ones(calc.shape[0])/calc.shape[0]
-            self.weights = np.ones(exp.shape[0])*weight
-        else:
-            self.experiment = np.vstack([self.experiment,exp])
-            self.calculated = np.hstack([self.calculated,calc])
-            self.labels = np.hstack([self.labels,label])
-            self.weights = np.hstack([self.weights,np.ones(exp.shape[0])*weight])
+
+        exp = np.asarray(exp,dtype=float)
+        calc = np.asarray(calc,dtype=float)
+        if exp.ndim!=2 or exp.shape[1]!=3:
+            raise ValueError("exp must have shape (ndata,3): value, sigma, bound")
+        if calc.ndim!=2 or calc.shape[1]!=exp.shape[0]:
+            raise ValueError("calc must have shape (nsamples,ndata) with ndata=%d" % exp.shape[0])
+        if len(label)!=exp.shape[0]:
+            raise ValueError("Number of labels (%d) does not match number of data (%d)" % (len(label),exp.shape[0]))
+        self._check_w0(calc.shape[0],"calc array")
+        if(len(self.w0)==0):
+            self.w0 = np.ones(calc.shape[0])/calc.shape[0]
+        self._add_data(label,exp,calc,weight)
             
     def predict(self,exp_file,calc_file,outfile=None,averaging="auto",fit='no',use_samples=[],use_data=[]):
 
@@ -117,6 +148,7 @@ class Reweight:
         # remove datapoints if use_samples or use_data is not empty
         label,exp, calc, log = bt.subsample(label,exp,calc,use_samples,use_data)
         self.log.write(log)
+        self._check_w0(calc.shape[0],calc_file)
 
         # do sanity checks
         stats,log  = bt.calc_stats(label,exp,calc,self.w0,self.w_opt,averaging=averaging,fit=fit,outfile=outfile)
@@ -127,11 +159,6 @@ class Reweight:
     def predict_array(self,label,exp,calc,outfile=None,averaging="linear",fit="no"):
         stats, log = bt.calc_stats(label,exp,calc,self.w0,self.w_opt,averaging=averaging,outfile=outfile,fit=fit)
         return stats
-
-
-        # do sanity checks
-        #log  = bt.check_data(label,exp,calc,self.w_opt)
-        #self.log.write(log)
 
     def get_lambdas(self):
         return self.lambdas
@@ -167,266 +194,199 @@ class Reweight:
         if(len(self.lambdas)==0):
             self.lambdas = lambda0
         else:
-            print("# Overriding lambdas is not possible")
-            sys.exit(1)
+            raise RuntimeError("# Overriding lambdas is not possible")
 
 
     # optimize
     def fit(self,theta,lambdas_init=True,method="BME"):
 
-        if(self.standardized==False):
-            log,v1,v2 = bt.standardize(self.experiment,self.calculated,self.w0,normalize="zscore")
-            self.standardized=True
+        if method not in known_methods:
+            raise ValueError("method %s not in known methods: %s" % (method,known_methods))
+        if len(self.experiment)==0:
+            raise ValueError("No data loaded. Call load() or load_array() before fit()")
 
-        assert method in known_methods, "method %s not in known methods:" % (method,known_methods)
-        
+        # Standardize a copy of the data, so that self.experiment/self.calculated
+        # always hold the original (non-standardized) values. This makes it safe
+        # to call load() again after fit(): the standardization is recomputed.
+        if(self.standardized==False):
+            exp_std = np.array(self.experiment,dtype=float)
+            calc_std = np.array(self.calculated,dtype=float)
+            log,v1,v2 = bt.standardize(exp_std,calc_std,self.w0,normalize="zscore")
+            self._exp_std = exp_std
+            self._calc_std = calc_std
+            self.standardized=True
+        exp = self._exp_std
+        calc = self._calc_std
+
         def maxent(lambdas):
             # weights
-            arg = -np.sum(lambdas[np.newaxis,:]*self.calculated,axis=1)-tmax+np.log(self.w0)
-            
+            # tmax is a constant shift: it cancels in the weights but it is kept
+            # in the objective because L-BFGS-B's relative stopping criterion
+            # depends on |f|; removing it would change converged results.
+            arg = -np.sum(lambdas[np.newaxis,:]*calc,axis=1)-tmax+np.log(self.w0)
+
             logz = logsumexp(arg)
             ww = np.exp(arg-logz)
-            
-            avg = np.sum(ww[:,np.newaxis]*self.calculated, axis=0)
-            
+
+            avg = np.sum(ww[:,np.newaxis]*calc, axis=0)
+
             # gaussian integral
-            eps2 = 0.5*np.sum((lambdas*lambdas)*theta_sigma2) 
-            
-            # experimental value 
-            sum1 = np.dot(lambdas,self.experiment[:,0])
-            #fun = sum1 + eps2 + np.log(zz)
+            eps2 = 0.5*np.sum((lambdas*lambdas)*theta_sigma2)
+
+            # experimental value
+            sum1 = np.dot(lambdas,exp[:,0])
             fun = sum1 + eps2 + logz
-            
+
             # gradient
-            #jac = self.experiment["avg"].values + lambdas*err - avg
-            jac = self.experiment[:,0] + lambdas*theta_sigma2 - avg
-            
+            jac = exp[:,0] + lambdas*theta_sigma2 - avg
 
             # divide by theta to avoid numerical problems
             return  fun/theta,jac/theta
 
-    
-        def maxent_hess(lambdas):
-            arg = -np.sum(lambdas[np.newaxis,:]*self.calculated,axis=1) -tmax
-            #arg -= tmax
-            
-            #########
-            ww = (self.w0*np.exp(arg))
-            zz = np.sum(ww)
-            assert np.isfinite(zz), "# Error. sum of weights is infinite. Use higher theta"
-            ww /= zz
-
-            q_w = np.dot(ww,self.calculated)
-            hess = np.einsum('k, ki, kj->ij',ww,self.calculated,self.calculated) - np.outer(q_w,q_w) + np.diag(theta_sigma2)
-
-            return  hess/theta
-
         def func_ber_gauss(w):
 
-            bcalc = np.sum(w[:,np.newaxis]*self.calculated,axis=0)
-            diff = bcalc-self.experiment[:,0]
-            #print(diff)
-            #ii = np.where(((diff<0) & (self.experiment[:,2]<0)) | ((diff>0) & (self.experiment[:,2]>0)) )[0#]
- #           ff = [1 if (self.experiment[j,2]==0 or j in ii) else 0 for j in range(self.experiment.shape[0])]
-            #diff *= ff
-            
-            chi2_half =  0.5*np.sum(((diff/self.experiment[:,1])**2))
+            bcalc = np.sum(w[:,np.newaxis]*calc,axis=0)
+            diff = bcalc-exp[:,0]
+            chi2_half =  0.5*np.sum(((diff/exp[:,1])**2))
 
-            
             idxs = np.where(w>1.0E-50)
             log_div = np.zeros(w.shape[0])
             log_div[idxs] = np.log(w[idxs]/self.w0[idxs])
             srel = theta*np.sum(w*log_div)
 
-            jac = np.sum(diff*self.calculated,axis=1) + theta*(1.+log_div)
-            return chi2_half+srel#, jac
-    
+            return chi2_half+srel
 
-        
+        def bound_mask(diff):
+            # 1 for data points that contribute: averages, or violated bounds
+            ii = ((diff<0) & (exp[:,2]<0)) | ((diff>0) & (exp[:,2]>0))
+            return np.where((exp[:,2]==0) | ii,1.0,0.0)
+
         def func_chi2_L2(w):
-
-            bcalc = np.sum(w[:,np.newaxis]*self.calculated,axis=0)
-            diff = (bcalc-self.experiment[:,0])/self.experiment[:,1]
-            
-            ii = np.where(((diff<0) & (self.experiment[:,2]<0)) | ((diff>0) & (self.experiment[:,2]>0)) )[0]
-            ff = [1 if (self.experiment[j,2]==0 or j in ii) else 0 for j in range(self.experiment.shape[0])]
-
-            diff *= ff
-            
+            # 0.5*sum_i ((<calc_i>_w - exp_i)/sigma_i)^2 and its gradient wrt w
+            bcalc = np.sum(w[:,np.newaxis]*calc,axis=0)
+            diff = (bcalc-exp[:,0])/exp[:,1]
+            diff *= bound_mask(diff)
             chi2_half =  0.5*np.sum(diff**2)
-
-            jac = np.sum(diff*self.calculated,axis=1)
-            #idxs = np.where(w>1.0E-50)
-                                                                                                                                              #srel = theta*np.sum(w[idxs]*np.log(w[idxs]/self.w0[idxs]))
-                                                                                                                                              #jac = 
-            return chi2_half
-        
-        def func_chi2_L1(w):
-
-            bcalc = np.sum(w[:,np.newaxis]*self.calculated,axis=0)
-            diff = (bcalc-self.experiment[:,0])/self.experiment[:,1]
-            
-            ii = np.where(((diff<0) & (self.experiment[:,2]<0)) | ((diff>0) & (self.experiment[:,2]>0)) )[0]
-            ff = [1 if (self.experiment[j,2]==0 or j in ii) else 0 for j in range(self.experiment.shape[0])]
-
-            diff *= ff
-            
-            chi2_half =  0.5*np.sum(diff**2)
-
-            jac = np.sum(diff*self.calculated,axis=1)
-            #idxs = np.where(w>1.0E-50)
-                                                                                                                                              #srel = theta*np.sum(w[idxs]*np.log(w[idxs]/self.w0[idxs]))
-                                                                                                                                              #jac = 
+            jac = np.dot(calc,diff/exp[:,1])
             return chi2_half,jac
 
+        def func_chi2_L1(w):
+            # sum_i |<calc_i>_w - exp_i|/sigma_i and its (sub)gradient wrt w
+            bcalc = np.sum(w[:,np.newaxis]*calc,axis=0)
+            diff = (bcalc-exp[:,0])/exp[:,1]
+            diff *= bound_mask(diff)
+            chi1 =  np.sum(np.abs(diff))
+            jac = np.dot(calc,np.sign(diff)/exp[:,1])
+            return chi1,jac
+
         if(lambdas_init==True):
-            lambdas=np.zeros(self.experiment.shape[0],dtype=np.longdouble)
+            lambdas=np.zeros(exp.shape[0],dtype=np.longdouble)
             self.log.write("Lagrange multipliers initialized from zero\n")
         else:
-            assert(len(self.lambdas)==self.experiment.shape[0])
+            if len(self.lambdas)!=exp.shape[0]:
+                raise ValueError("Warm start requires lambdas from a previous fit on the same data (%d lambdas, %d data)" % (len(self.lambdas),exp.shape[0]))
             lambdas = np.copy(self.lambdas)
-            #np.array(lambdas_init)
             self.log.write("Warm start\n")
-        #print(lambdas)
-            
+
         bounds = []
-        for j in range(self.experiment.shape[0]):
-            if(self.experiment[j,2]==0):
+        for j in range(exp.shape[0]):
+            if(exp[j,2]==0):
                 bounds.append([None,None])
-            elif(self.experiment[j,2]==-1):
+            elif(exp[j,2]==-1):
                 bounds.append([None,0.0])
             else:
                 bounds.append([0.0,None])
 
         if(method=="BME"):
-            opt={'maxiter':50000,'disp':False}
-            
+            opt={'maxiter':50000}
             tmax = np.log((sys.float_info.max)/5.)
 
-            theta_sigma2 = theta*self.weights*self.experiment[:,1]**2
+            theta_sigma2 = theta*self.weights*exp[:,1]**2
 
-            chi2_before  = bt.calc_chi(self.experiment,self.calculated,self.w0)
-            self.log.write("Optimizing %d data and %d samples. Theta=%f \n" % (self.experiment.shape[0],self.calculated.shape[0],theta))
+            chi2_before  = bt.calc_chi(exp,calc,self.w0)
+            self.log.write("Optimizing %d data and %d samples. Theta=%f \n" % (exp.shape[0],calc.shape[0],theta))
             self.log.write("CHI2 before optimization: %8.4f \n" % (chi2_before))
             self.log.flush()
             mini_method = "L-BFGS-B"
             start_time = time.time()
-            #if(all(self.experiment[:,2]==0)):
-            #    mini_method="trust-constr"
-            #    result = minimize(maxent,lambdas,\
-            #                               options=opt,method=mini_method,\
-            #                               jac=True,hess=maxent_hess)
-            
+
             result = minimize(maxent,lambdas,\
                               options=opt,method=mini_method,\
                               jac=True,bounds=bounds)
             self.log.write("Execution time: %.2f seconds\n" % (time.time() - start_time))
-            
+
             if(result.success):
                 self.log.write("Minimization using %s successful (iterations:%d)\n" % (mini_method,result.nit))
-                arg = -np.sum(result.x[np.newaxis,:]*self.calculated,axis=1) -tmax
-                w_opt = self.w0*np.exp(arg)
+                # normalized weights computed in log space (no under/overflow)
+                arg = -np.sum(result.x[np.newaxis,:]*calc,axis=1) + np.log(self.w0)
+                w_opt = np.exp(arg-logsumexp(arg))
                 w_opt /= np.sum(w_opt)
                 self.lambdas = np.copy(result.x)
                 self.w_opt = np.copy(w_opt)
                 self.niter = result.nit
-                chi2_after  = bt.calc_chi(self.experiment,self.calculated,w_opt)
+                chi2_after  = bt.calc_chi(exp,calc,w_opt)
                 phi = np.exp(-bt.srel(self.w0,w_opt))
-                
+
                 self.log.write("CHI2 after optimization: %8.4f \n" % (chi2_after))
                 self.log.write("Fraction of effective frames: %8.4f \n" % (phi))
                 self.log.flush()
                 return chi2_before,chi2_after,phi
-            
+
             else:
                 self.log.write("Minimization using %s failed\n" % (mini_method))
                 self.log.write("Message: %s\n" % (result.message))
                 self.niter = -1
                 self.log.flush()
-                return np.NaN, np.NaN, np.NaN
-            
-            
+                return np.nan, np.nan, np.nan
 
-        # please check 
+        # direct optimization of the weights (BER, CHI2_L2, CHI2_L1)
+        cons = {'type': 'eq', 'fun':lambda x: np.sum(x)-1.0}
+        wbounds = [(0.,None)]*len(self.w0)
+        mini_method = "SLSQP"
         if(method=="BER"):
-            
-            opt={'maxiter':2000,'disp': True,'ftol':1.0e-20}
-            cons = {'type': 'eq', 'fun':lambda x: np.sum(x)-1.0}
-            bounds = [(0.,None)]*len(self.w0)
-            mini_method = "SLSQP"
-            chi2_before  = bt.calc_chi(self.experiment,self.calculated,self.w0)
-            self.log.write("CHI2 before optimization: %8.4f \n" % (chi2_before))
+            func,use_jac = func_ber_gauss,False
+            opt={'maxiter':2000,'disp': False,'ftol':1.0e-20}
+        elif(method=="CHI2_L2"):
+            func,use_jac = func_chi2_L2,True
+            opt={'maxiter':2000,'disp': False,'ftol':1.0e-20}
+        else: # CHI2_L1
+            func,use_jac = func_chi2_L1,True
+            opt={'maxiter':2000,'disp': False,'ftol':1.0e-12}
+
+        chi2_before  = bt.calc_chi(exp,calc,self.w0)
+        self.log.write("Optimizing %d data and %d samples with %s. Theta=%f \n" % (exp.shape[0],calc.shape[0],method,theta))
+        self.log.write("CHI2 before optimization: %8.4f \n" % (chi2_before))
+        self.log.flush()
+        start_time = time.time()
+        result = minimize(func,np.copy(self.w0),constraints=cons,options=opt,method=mini_method,bounds=wbounds,jac=use_jac)
+        self.log.write("Execution time: %.2f seconds\n" % (time.time() - start_time))
+        self.niter = result.nit
+        if(result.success):
+            self.log.write("Minimization using %s successful (iterations:%d)\n" % (mini_method,result.nit))
+            w_opt = np.clip(result.x,0.,None)
+            w_opt /= np.sum(w_opt)
+            self.w_opt = np.copy(w_opt)
+            chi2_after  = bt.calc_chi(exp,calc,w_opt)
+            phi = np.exp(-bt.srel(self.w0,w_opt))
+            self.log.write("CHI2 after optimization: %8.4f \n" % (chi2_after))
+            self.log.write("Fraction of effective frames: %8.4f \n" % (phi))
             self.log.flush()
-                                                                                                                                            
-            w0 = np.copy(self.w0)
-            start_time = time.time()
-            #print(func_ber_gauss(w0))
-            #result = minimize(func_ber_gauss,w0,constraints=cons,options=opt,method=mini_method,bounds=bounds,jac=True)
-            result = minimize(func_ber_gauss,w0,constraints=cons,options=opt,method=mini_method,bounds=bounds,jac=False)
-            self.log.write("Execution time: %.2f seconds\n" % (time.time() - start_time))
-            if(result.success):
-                self.log.write("Minimization using %s successful (iterations:%d)\n" % (mini_method,result.nit))
-                w_opt = np.copy(result.x)
-                self.w_opt = w_opt
-                chi2_after  = bt.calc_chi(self.experiment,self.calculated,w_opt)
-                phi = np.exp(-bt.srel(self.w0,w_opt))
-                self.log.write("CHI2 after optimization: %8.4f \n" % (chi2_after))
-                self.log.write("Fraction of effective frames: %8.4f \n" % (phi))
-                self.log.flush()
-                return chi2_before,chi2_after,phi
-            
-            else:
-                self.log.write("Minimization using %s failed\n" % (mini_method))
-                self.log.write("Message: %s\n" % (result.message))
-                self.log.flush()
-                return np.NaN, np.NaN, np.NaN
-   
-        # please check 
-        if(method=="CHI2_L2"):
-            
-            opt={'maxiter':2000,'disp': True,'ftol':1.0e-20}
-            cons = {'type': 'eq', 'fun':lambda x: np.sum(x)-1.0}
-            bounds = [(0.,None)]*len(self.w0)
-            meth = "SLSQP"
-            chi2_before  = bt.calc_chi(self.experiment,self.calculated,self.w0)
-            self.log.write("CHI2 before optimization: %8.4f \n" % (chi2_before))
-            start_time = time.time()
-            result = minimize(func_chi2_L2,self.w0,constraints=cons,options=opt,method=meth,jac=True,bounds=bounds)
-
-            w_opt = np.copy(result.x)
-            self.w_opt = w_opt
-            chi2_after  = bt.calc_chi(self.experiment,self.calculated,w_opt)
-            phi = np.exp(-bt.srel(self.w0,w_opt))
-            self.log.write("Execution time: %.2f seconds\n" % (time.time() - start_time))
-            self.log.write("CHI2 after optimization: %8.4f \n" % (chi2_after))
-
-        # please check 
-        if(method=="CHI2_L1"):
-            
-            opt={'maxiter':2000,'disp': True,'ftol':1.0e-20}
-            cons = {'type': 'eq', 'fun':lambda x: np.sum(x)-1.0}
-            bounds = [(0.,None)]*len(self.w0)
-            meth = "SLSQP"
-            chi2_before  = bt.calc_chi(self.experiment,self.calculated,self.w0)
-            self.log.write("CHI2 before optimization: %8.4f \n" % (chi2_before))
-            start_time = time.time()
-            result = minimize(func_chi2_L2,self.w0,constraints=cons,options=opt,method=meth,jac=True,bounds=bounds)
-
-            w_opt = np.copy(result.x)
-            self.w_opt = w_opt
-            chi2_after  = bt.calc_chi(self.experiment,self.calculated,w_opt)
-            phi = np.exp(-bt.srel(self.w0,w_opt))
-            self.log.write("Execution time: %.2f seconds\n" % (time.time() - start_time))
-            self.log.write("CHI2 after optimization: %8.4f \n" % (chi2_after))
-
+            return chi2_before,chi2_after,phi
+        else:
+            self.log.write("Minimization using %s failed\n" % (mini_method))
+            self.log.write("Message: %s\n" % (result.message))
+            self.niter = -1
+            self.log.flush()
+            return np.nan, np.nan, np.nan
 
 
     def theta_scan(self,thetas=[],train_fraction_data=0.75,nfold=5,train_fraction_samples=0.8):
 
         np.random.seed(42)
         tmp_dir = "theta_scan"
-        os.system("mkdir -p %s" % tmp_dir)
+        os.makedirs(tmp_dir,exist_ok=True)
         if(len(thetas)==0): thetas = np.geomspace(0.1,10000,10)
+        thetas = np.asarray(thetas,dtype=float)
         print("Performing %d-fold cross validation for %d theta values" % (nfold,len(thetas)))
         print("Output files are written to %s" % (tmp_dir))
               
@@ -480,7 +440,9 @@ class Reweight:
                 results[j,i,0] = train_stats[3]/train_stats[0]
                 results[j,i,1] = test_stats[3]/test_stats[0]
                 results[j,i,2] = phi
+            r1.close()
 
+        plt = _pyplot()
         fig,ax = plt.subplots(1,1,figsize=(12,8))
         for k in range(nfold):
             plt.scatter(thetas,results[:,k,0],c='k',s=4)
@@ -490,7 +452,7 @@ class Reweight:
         avg_test_error = np.nanmean(results[:,:,1],axis=1)
         avg_train_error = np.nanmean(results[:,:,0],axis=1)
         avg_phi = np.nanmean(results[:,:,2],axis=1)
-        argmin = np.argmin(avg_test_error)
+        argmin = np.nanargmin(avg_test_error)
         
         print("Optimal theta: %.2f" % thetas[argmin])
         print("Validation error reduction %.3f" % avg_test_error[argmin])
@@ -501,10 +463,10 @@ class Reweight:
         plt.plot(thetas,avg_test_error,"-o",c='r',label="Test error")
         plt.plot(thetas,avg_phi,"-o",c='b',label="Phi")
         plt.legend()
-        if(np.max(results[:,:,1])<1.):
+        if(not np.nanmax(results[:,:,1])>=1.):
             ax.set_ylim(0,1.1)
         else:
-            ax.set_ylim(0,np.min([2,1.1*np.max(results[:,:,1])]))
+            ax.set_ylim(0,np.min([2,1.1*np.nanmax(results[:,:,1])]))
         plt.scatter(thetas[argmin],avg_train_error[argmin],c='r')
         ax.axhline(1,ls="--",color='0.4')
         ax.set_xscale('log')
@@ -533,7 +495,7 @@ class Reweight:
             inv_var = np.ones(len(exp))
 
         log = ""
-        rr_old = np.NaN
+        rr_old = np.nan
         #self.log.write("acascacasacas\n")
         for it in range(iterations):
             
@@ -550,6 +512,11 @@ class Reweight:
             r1 = Reweight("%s_ibme_%d" % (name,it),w0=np.copy(w0))
             r1.load_array(labels,np.copy(exp),np.copy(calc))
             rr= r1.fit(theta=theta)
+            r1.close()
+            if(np.isnan(rr[1])):
+                self.log.write(log)
+                self.log.flush()
+                raise RuntimeError("iBME: BME minimization failed at iteration %d (see %s_ibme_%d.log)" % (it,name,it))
             if(it==0): chi2_0 = rr[0]
             if(it==0): calc_0 = np.copy(calc)
                 
@@ -592,17 +559,15 @@ class Reweight:
 
         try:
             return self.ibme_weights
-        except:
-            print("# iBME weights not available. Call iBME first")
-            sys.exit(1)
+        except AttributeError:
+            raise RuntimeError("# iBME weights not available. Call iBME first")
 
     def get_ibme_stats(self):
 
         try:
             return self.ibme_stats
-        except:
-            print("# iBME stats not available. Call iBME first")
-            sys.exit(1)
+        except AttributeError:
+            raise RuntimeError("# iBME stats not available. Call iBME first")
 
         
     def iterative_theta_scan(self,thetas=[],ftol=0.01,iterations=50,lr_weights=True,offset=True,
@@ -610,6 +575,7 @@ class Reweight:
 
         np.random.seed(42)
         if(len(thetas)==0): thetas = np.geomspace(0.1,10000,10)
+        thetas = np.asarray(thetas,dtype=float)
         print("Performing %d-fold cross validation for %d theta values" % (nfold,len(thetas)))
         nsamples = self.get_nsamples()
         ndata =   self.get_ndata()
@@ -680,7 +646,9 @@ class Reweight:
                 results[j,i,0] = chi_train_1/chi_train_0
                 results[j,i,1] = chi_test_1/chi_test_0
                 results[j,i,2] = phi
+            r1.close()
 
+        plt = _pyplot()
         fig,ax = plt.subplots(1,1,figsize=(12,8))
         for k in range(nfold):
             plt.scatter(thetas,results[:,k,0],c='k',s=4)
@@ -690,7 +658,7 @@ class Reweight:
         avg_test_error = np.nanmean(results[:,:,1],axis=1)
         avg_train_error = np.nanmean(results[:,:,0],axis=1)
         avg_phi = np.nanmean(results[:,:,2],axis=1)
-        argmin = np.argmin(avg_test_error)
+        argmin = np.nanargmin(avg_test_error)
         
         print("Optimal theta: %.2f" % thetas[argmin])
         print("Validation error reduction %.3f" % avg_test_error[argmin])
@@ -701,10 +669,10 @@ class Reweight:
         plt.plot(thetas,avg_test_error,"-o",c='r',label="Test error")
         plt.plot(thetas,avg_phi,"-o",c='b',label="Phi")
         plt.legend()
-        if(np.max(results[:,:,1])<1.):
+        if(not np.nanmax(results[:,:,1])>=1.):
             ax.set_ylim(0,1.1)
         else:
-            ax.set_ylim(0,np.min([2,1.1*np.max(results[:,:,1])]))
+            ax.set_ylim(0,np.min([2,1.1*np.nanmax(results[:,:,1])]))
         plt.scatter(thetas[argmin],avg_train_error[argmin],c='r')
         ax.axhline(1,ls="--",color='0.4')
         ax.set_xscale('log')
